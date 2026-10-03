@@ -19,6 +19,9 @@ pub struct AutoTone {
     pub blacks: f64,
     pub vibrance: f64,
     pub saturation: f64,
+    /// Camera-preview-guided primary corrections, when a usable reference is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<lightcraft_develop::Calibration>,
 }
 
 fn percentile(sorted: &[f32], q: f32) -> f32 {
@@ -91,6 +94,7 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
         blacks: blacks.round() as f64,
         vibrance: vibrance.round() as f64,
         saturation: saturation.round() as f64,
+        calibration: None,
     }
 }
 

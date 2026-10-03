@@ -22,6 +22,48 @@ fn demo_library_loads() {
 }
 
 #[test]
+fn auto_uses_raw_preview_and_undo_restores_all_settings() {
+    use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
+    use lightcraft_pipeline::{RenderRequest, SourceInfo};
+    use lightcraft_raster::Rgb32f;
+    use std::sync::Arc;
+
+    let src = Rgb32f::from_fn(48, 32, |x, _| {
+        let l = 0.04 + x as f32 * 0.005;
+        [l * 0.8, l, l * 1.2]
+    });
+    let info = SourceInfo { raw: true, ..Default::default() };
+    let mut look = lightcraft_develop::DevelopSettings::default();
+    look.light.exposure = 0.8;
+    look.color.saturation = 60.0;
+    let preview = lightcraft_pipeline::render(&src, &info, &look, &RenderRequest::fit(48, 32)).image;
+    let mut s = Session::new();
+    let id = PhotoId(1);
+    let mut p = Photo::new(id, Source::File { path: "synthetic.cr2".into() }, "synthetic.cr2", "CR2", 48, 32, "");
+    p.kind = MediaKind::Raw;
+    p.as_shot_wb = Some((6500.0, 0.0));
+    s.catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    s.media.file_loader = Some(Arc::new(move |_, _| Ok((src.clone(), info))));
+    s.media.preview_loader = Some(Arc::new(move |_, _| Some(preview.clone())));
+    s.execute("library.select", &json!({"ids": [1]})).unwrap();
+    let before = active_dev(&s);
+    let a = s.execute("develop.auto", &json!({})).unwrap();
+    assert!(a["calibration"].is_object(), "{a}");
+    let after = active_dev(&s);
+    assert_ne!(after, before);
+    assert_eq!(serde_json::to_value(after.calibration).unwrap(), a["calibration"]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), after);
+    // Missing embedded previews must still leave Auto usable.
+    s.media.preview_loader = None;
+    let fallback = s.execute("develop.auto", &json!({})).unwrap();
+    assert!(fallback.get("calibration").is_none());
+    assert_eq!(active_dev(&s).calibration, after.calibration);
+}
+
+#[test]
 fn rating_flag_undo_redo() {
     let mut s = demo();
     let id = s.active().unwrap();

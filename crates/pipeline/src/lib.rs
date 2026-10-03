@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auto;
+pub mod auto_reference;
 pub mod colorops;
 pub mod finish;
 pub mod geometry;

@@ -64,6 +64,8 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
+    /// Run Auto on imported photos that have no XMP sidecar or embedded XMP packet.
+    pub auto_without_xmp: bool,
 }
 
 /// How copies are filed in the destination.
@@ -534,6 +536,7 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
     crate::memory::release();
     let now = (s.clock)();
     let mut ops = promote;
+    let mut auto_ids = Vec::new();
     for (path, info) in todo.into_iter().zip(probed) {
         let info = match info {
             Ok(i) => i,
@@ -603,9 +606,9 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
         p.embedded_lens = info.embedded_lens;
         apply_import_defaults(s, &mut p);
         let raw = p.kind == lightcraft_catalog::MediaKind::Raw;
-        let packet = crate::sidecar::find_sidecar(&path, s.xmp.naming)
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .or_else(|| info.xmp.clone().filter(|_| raw));
+        let sidecar_path = crate::sidecar::find_sidecar(&path, s.xmp.naming);
+        let has_xmp = sidecar_path.is_some() || (raw && info.xmp.is_some());
+        let packet = sidecar_path.and_then(|f| std::fs::read_to_string(f).ok()).or_else(|| info.xmp.clone().filter(|_| raw));
         if let Some(x) = packet {
             match crate::sidecar::parse_sidecar(&x, raw).map(|sc| sc.resolve_label(&s.catalog)) {
                 Ok(sc) if sc != crate::sidecar::SidecarData::default() => {
@@ -633,11 +636,24 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
             p.history.push(lightcraft_catalog::HistoryStep { label, settings: d });
         }
         report.imported.push(id.0);
+        if opts.auto_without_xmp && !has_xmp {
+            auto_ids.push(id);
+        }
         p.local = opts.local;
         ops.push(Op::AddPhoto { photo: Box::new(p) });
     }
     if !ops.is_empty() {
         s.commit(&format!("Add {} Photo{}", ops.len(), if ops.len() == 1 { "" } else { "s" }), Op::Batch { ops })?;
+    }
+    if !auto_ids.is_empty() {
+        let selection = s.selection.clone();
+        for id in auto_ids {
+            s.selection = crate::view::Selection::single(id);
+            // A malformed or unsupported source must not turn a successful import into a partial
+            // failure. The photo remains imported with its normal defaults.
+            let _ = s.execute("develop.auto", &serde_json::Value::Null);
+        }
+        s.selection = selection;
     }
     Ok(report)
 }

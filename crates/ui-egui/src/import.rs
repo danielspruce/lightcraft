@@ -54,6 +54,8 @@ pub struct ImportDialog {
     pub metadata_preset: String,
     /// Copy: raws are copied as DNG.
     pub dng: bool,
+    /// Apply Auto to selected photos without XMP.
+    pub auto_without_xmp: bool,
 }
 
 impl ImportDialog {
@@ -89,6 +91,8 @@ pub struct ImportTask {
     pub failed: usize,
     undo0: usize,
     first: Option<u64>,
+    preserve_selection: bool,
+    selection_before: lightcraft_engine::Selection,
 }
 
 /// Start scanning `paths` off the UI thread; the review dialog opens when scanning finishes.
@@ -168,6 +172,9 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
     if !d.metadata_preset.is_empty() {
         params["metadataPreset"] = json!(d.metadata_preset);
     }
+    if d.auto_without_xmp {
+        params["autoWithoutXmp"] = json!(true);
+    }
     if d.copy {
         if !d.destination.trim().is_empty() {
             params["destination"] = json!(d.destination.trim());
@@ -184,7 +191,9 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
         }
     }
     let total = queue.len();
-    app.import = Some(ImportTask { queue, total, params, undo0, ..Default::default() });
+    let preserve_selection = d.auto_without_xmp;
+    let selection_before = app.session.selection.clone();
+    app.import = Some(ImportTask { queue, total, params, undo0, preserve_selection, selection_before, ..Default::default() });
     app.renderer.forget_imports();
     Ok(json!({"importing": total}))
 }
@@ -202,6 +211,9 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     }
     let r = app.session.execute("library.import", &p);
     let task = app.import.as_mut().expect("import task");
+    if task.preserve_selection {
+        app.session.selection = task.selection_before.clone();
+    }
     task.done += n;
     match r {
         Ok(v) => {
@@ -226,7 +238,7 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     let steps = app.session.undo.len().saturating_sub(task.undo0);
     let label = format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
     app.session.merge_undo(steps, &label);
-    if let Some(f) = task.first {
+    if !task.preserve_selection && let Some(f) = task.first {
         let _ = app.run("library.select", json!({"ids": [f]}));
     }
     let mut msg = format!("Added {} photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
@@ -439,6 +451,8 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             }
         });
     });
+    let r = ui.checkbox(&mut d.auto_without_xmp, "Apply Auto to photos without XMP");
+    register(ui.ctx(), "check:importAutoWithoutXmp", r.rect);
     if !app.session.metadata_presets.is_empty() {
         field(ui, "Metadata", |ui| {
             let cur = if d.metadata_preset.is_empty() { "None".to_string() } else { d.metadata_preset.clone() };
