@@ -23,12 +23,14 @@ pub fn apply_slider_out(
 ) {
     if out.drag_started && !out.reset {
         let _ = app.run("develop.beginInteraction", json!({"label": spec.label}));
+        app.ui.dragging_control = Some(spec.id.to_string());
     }
     if let Some(v) = out.value {
         let _ = set(app, v);
     }
     if out.drag_stopped || out.reset {
         let _ = app.run("develop.endInteraction", json!({}));
+        app.ui.dragging_control = None;
     }
 }
 
@@ -99,6 +101,19 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             });
         });
     });
+    let n = app.session.selection.ids.len();
+    if app.session.auto_sync && n > 1 {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("Auto Sync: edits apply to {n} photos")).color(t.accent).size(12.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if text_button(ui, "autoSyncOff", "Turn Off", false).clicked() {
+                        let _ = app.run("develop.autoSync", json!({"on": false}));
+                    }
+                });
+            });
+        });
+    }
     divider(ui);
     // profile row
     egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 14, bottom: 14 }).show(ui, |ui| {

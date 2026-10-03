@@ -74,8 +74,19 @@ pub type PreviewLoader = Arc<dyn Fn(&str, usize) -> Option<Rgba8> + Send + Sync>
 #[derive(Clone)]
 pub enum SourceRef {
     Loaded(Arc<Rgb32f>),
-    Demo { scene: Box<lightcraft_scenes::Scene>, max_edge: usize },
-    File { path: String, max_edge: usize, loader: Option<FileLoader> },
+    Demo {
+        scene: Box<lightcraft_scenes::Scene>,
+        max_edge: usize,
+    },
+    File {
+        path: String,
+        max_edge: usize,
+        loader: Option<FileLoader>,
+    },
+    /// A smart preview standing in for a missing original.
+    Smart {
+        path: std::path::PathBuf,
+    },
 }
 
 impl SourceRef {
@@ -87,6 +98,10 @@ impl SourceRef {
                 Some(l) => l(path, *max_edge).map(|(img, _)| Arc::new(img)),
                 None => Err(format!("no decoder available for {path}")),
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            SourceRef::Smart { path } => crate::smart::load(path),
+            #[cfg(target_arch = "wasm32")]
+            SourceRef::Smart { .. } => Err("smart previews are not available here".into()),
         }
     }
 }
@@ -108,6 +123,8 @@ pub struct MediaCache {
     pub preview_loader: Option<PreviewLoader>,
     /// Reads a photo file's bytes (Photo Merge); `None` = the local file system.
     pub file_bytes: Option<crate::merge::ByteReader>,
+    /// The library's smart previews folder (originals offline: render from the proxy).
+    pub smart_dir: Option<std::path::PathBuf>,
     scenes: Vec<lightcraft_scenes::Scene>,
     /// Rendered thumbnails (memory, plus disk once a library is attached).
     pub rendered: Arc<PreviewCache>,
@@ -126,6 +143,7 @@ impl Default for MediaCache {
             file_probe: None,
             preview_loader: None,
             file_bytes: None,
+            smart_dir: None,
             scenes: Vec::new(),
             rendered: Arc::new(PreviewCache::memory(rendered_budget(budget))),
         }
@@ -266,6 +284,16 @@ impl MediaCache {
             (Source::Demo { .. }, SourceLevel::Full) => p.width.max(p.height).max(1) as usize,
             _ => usize::MAX,
         });
+        // the original is offline: its smart preview, when there is one
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Source::File { path }, Some(dir)) = (&p.source, &self.smart_dir)
+            && !std::path::Path::new(path).exists()
+        {
+            let sp = dir.join(crate::smart::file_name(p));
+            if sp.exists() {
+                return SourceRef::Smart { path: sp };
+            }
+        }
         self.origin_ref(&p.source, max_edge)
     }
 
@@ -511,12 +539,15 @@ impl crate::Session {
         let request = RenderRequest { apply_crop, ..RenderRequest::fit(max_w, max_h) };
         // the photo id is part of the key: two photos with the same settings and size must not
         // share a result (a view slot showing photo A would otherwise look current for photo B)
+        // …and so is the file's content: a file changed on disk (Reload) renders afresh
+        let content = Hasher128::new().str(&content_key(&p)).finish().0 as u64;
         let key = settings.hash64()
             ^ ((max_w as u64) << 40)
             ^ ((max_h as u64) << 20)
             ^ (apply_crop as u64)
             ^ (level as u64) << 60
-            ^ id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            ^ id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ content.rotate_left(17);
         let cache = thumb_bucket.map(|b| {
             let k = Hasher128::new().str(&content_key(&p)).u64(settings.hash64()).u64(b as u64).u64(RENDER_CACHE_VERSION).finish();
             (self.media.rendered.clone(), k)

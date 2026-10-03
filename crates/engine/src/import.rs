@@ -52,6 +52,41 @@ pub struct ImportOptions {
     /// Browsing a folder: photos come in as `local` (not in the library), and a file with the
     /// same content as one already known is still listed.
     pub local: bool,
+    /// Copy: where the copies go (default: the library's `Originals/`).
+    pub destination: Option<String>,
+    /// Copy: the folders inside the destination.
+    pub organize: Organize,
+    /// Copy: a file-name template for the copies ([`crate::rename::expand`] tokens: `{name}`,
+    /// `{seq:N}`, `{date:%Y%m%d}`, `{camera}`…), numbered from `rename_start`.
+    pub rename: Option<String>,
+    pub rename_start: usize,
+    /// A metadata preset (by name) applied to every imported photo.
+    pub metadata_preset: Option<String>,
+    /// Copy: raws are copied as DNG (Copy as DNG).
+    pub convert_dng: bool,
+}
+
+/// How copies are filed in the destination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Organize {
+    /// `YYYY/YYYY-MM-DD/` by capture date.
+    #[default]
+    ByDay,
+    /// `YYYY/YYYY-MM/`.
+    ByMonth,
+    /// All in the destination itself.
+    Flat,
+}
+
+impl Organize {
+    pub fn parse(s: &str) -> Option<Organize> {
+        match s {
+            "date" | "day" | "byDay" => Some(Organize::ByDay),
+            "month" | "byMonth" => Some(Organize::ByMonth),
+            "flat" | "none" | "intoOneFolder" => Some(Organize::Flat),
+            _ => None,
+        }
+    }
 }
 
 /// A file found by [`scan`], for the import review.
@@ -153,6 +188,12 @@ pub struct ImportDefaults {
     pub creator: String,
     /// Metadata preset applied to every imported photo (`metadata.*`; `None` = none).
     pub metadata_preset: Option<String>,
+    /// Auto import: a watched folder whose new photos are added as they arrive (`None` = off),
+    /// copied into the library's Originals instead of added in place when `auto_copy`, and an
+    /// album they go to.
+    pub auto_folder: Option<String>,
+    pub auto_copy: bool,
+    pub auto_album: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -252,6 +293,11 @@ fn expand_with_progress(paths: &[String], skip: Option<&Path>, progress: Option<
     out
 }
 
+/// Probe files (headers + content hash) as an import would.
+pub(crate) fn probe_paths(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
+    probe_all(s, paths)
+}
+
 fn probe_all(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
     probe_all_with_progress(s, paths, None)
 }
@@ -311,13 +357,20 @@ fn probe_all_with_progress(s: &Session, paths: &[String], progress: Option<&Impo
         .collect()
 }
 
-/// `Originals/YYYY/YYYY-MM-DD/name`, made unique.
-fn copy_into_library(lib: &Path, src: &str, date: &str) -> Result<String, String> {
+/// Copy `src` into `root` (filed per `organize` by `date`) as `name` (default: its own name),
+/// made unique with -1, -2…; returns the new path.
+fn copy_into(root: &Path, src: &str, date: &str, organize: Organize, name: Option<&str>) -> Result<String, String> {
     let day = date.get(..10).filter(|d| d.len() == 10).unwrap_or("undated");
     let year = day.get(..4).unwrap_or("undated");
-    let dir = lib.join("Originals").join(year).join(day);
+    let dir = match organize {
+        Organize::ByDay => root.join(year).join(day),
+        Organize::ByMonth => root.join(year).join(day.get(..7).unwrap_or("undated")),
+        Organize::Flat => root.to_path_buf(),
+    };
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let name = Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photo".into());
+    let name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photo".into()));
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (name.clone(), String::new()),
@@ -438,9 +491,17 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
     // added file in its own storage already, so "copy" there means "add".
     let mode = if mode == ImportMode::Copy && s.library.as_ref().is_some_and(|l| !l.on_disk) { ImportMode::Add } else { mode };
     let lib_dir = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
-    if mode == ImportMode::Copy && lib_dir.is_none() {
-        return Err(crate::EngineError::Other("copying into the library needs an open library".into()));
+    // where copies go: the chosen folder, else the library's Originals/
+    let copy_root = opts
+        .destination
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| lib_dir.as_ref().map(|l| l.join("Originals")));
+    if mode == ImportMode::Copy && copy_root.is_none() {
+        return Err(crate::EngineError::Other("copying needs a destination folder or an open library".into()));
     }
+    let mut seq = opts.rename_start.max(1);
     let files = expand(paths, lib_dir.as_deref());
     let mut report = ImportReport { scanned: files.len(), ..Default::default() };
 
@@ -489,9 +550,21 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
             report.duplicates.push(Duplicate { path, existing: Some(id.0), reason: "content" });
             continue;
         }
-        let stored = match (mode, &lib_dir) {
-            (ImportMode::Copy, Some(lib)) if !Path::new(&path).starts_with(lib) => {
-                match copy_into_library(lib, &path, info.captured.as_deref().unwrap_or(&now)) {
+        let stored = match (mode, &copy_root) {
+            (ImportMode::Copy, Some(root))
+                if !Path::new(&path).starts_with(root) && !lib_dir.as_ref().is_some_and(|l| Path::new(&path).starts_with(l)) =>
+            {
+                let name = opts.rename.as_deref().filter(|t| !t.trim().is_empty()).map(|t| {
+                    // the template sees the photo as it will be catalogued
+                    let own = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let mut q = Photo::new(PhotoId(0), Source::File { path: path.clone() }, &own, &info.format, 0, 0, &now);
+                    q.captured = info.captured.clone();
+                    q.meta = info.meta.clone();
+                    let n = crate::rename::expand(t, &q, seq);
+                    seq += 1;
+                    n
+                });
+                match copy_into(root, &path, info.captured.as_deref().unwrap_or(&now), opts.organize, name.as_deref()) {
                     Ok(p) => p,
                     Err(e) => {
                         report.failed.push((path, e));
@@ -505,7 +578,21 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
         if let Some(h) = &info.content_hash {
             by_hash.insert(h.clone(), id);
         }
-        let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
+        // Copy as DNG: the copied raw becomes a DNG (the copy is ours to replace)
+        let mut stored = stored;
+        let mut info = info;
+        if opts.convert_dng && mode == ImportMode::Copy && stored != path && info.kind == MediaKind::Raw && !info.format.eq_ignore_ascii_case("DNG") {
+            match crate::cmd::convert::write_dng_for(s, &stored, String::new()) {
+                Ok(dng) => {
+                    let _ = std::fs::remove_file(&stored);
+                    stored = dng;
+                    info.format = "DNG".into();
+                }
+                Err(e) => log::warn!("import {path}: copy as DNG: {e}"),
+            }
+        }
+        // a copy is catalogued under its new name
+        let name = Path::new(&stored).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
         let mut p = Photo::new(id, Source::File { path: stored }, &name, &info.format, info.width, info.height, &now);
         p.kind = info.kind;
         p.file_size = info.file_size;
@@ -520,7 +607,7 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
             .and_then(|f| std::fs::read_to_string(f).ok())
             .or_else(|| info.xmp.clone().filter(|_| raw));
         if let Some(x) = packet {
-            match crate::sidecar::parse_sidecar(&x, raw) {
+            match crate::sidecar::parse_sidecar(&x, raw).map(|sc| sc.resolve_label(&s.catalog)) {
                 Ok(sc) if sc != crate::sidecar::SidecarData::default() => {
                     crate::sidecar::merge_into(&mut p, &sc, &now);
                     report.sidecars += 1;
@@ -528,6 +615,9 @@ pub fn import_with(s: &mut Session, paths: &[String], opts: &ImportOptions) -> c
                 Ok(_) => {}
                 Err(e) => log::warn!("import {path}: XMP: {e}"),
             }
+        }
+        if let Some(mp) = opts.metadata_preset.as_ref().and_then(|n| s.metadata_presets.iter().find(|m| m.name.eq_ignore_ascii_case(n))) {
+            crate::cmd::metadata::apply_to(&mut p.meta, &mp.fields);
         }
         for k in &opts.keywords {
             let k = lightcraft_catalog::keywords::clean(k);

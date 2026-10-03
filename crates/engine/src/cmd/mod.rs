@@ -7,13 +7,14 @@
 mod before;
 mod browse;
 mod color;
+pub(crate) mod convert;
 mod develop;
 mod edit;
 mod export;
 pub mod filters;
-mod keywords;
+pub mod keywords;
 mod library;
-mod manage;
+pub mod manage;
 mod masks;
 mod merge;
 pub mod metadata;
@@ -21,6 +22,7 @@ pub mod missing;
 mod organize;
 mod prefs;
 mod preset_files;
+pub mod previews;
 mod query;
 mod xmp;
 
@@ -118,6 +120,9 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(organize::specs());
         v.extend(keywords::specs());
         v.extend(manage::specs());
+        v.extend(previews::specs());
+        v.extend(convert::specs());
+        v.extend(convert::edit_specs());
         v.extend(merge::specs());
         v.extend(query::specs());
         v.extend(xmp::specs());

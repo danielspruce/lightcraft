@@ -370,16 +370,33 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Info",
             [],
             None,
-            "{ids?, title?, caption?, altText?, extendedDescription?, copyright?, creator?, location?, city?, state?, country?, keywords?: [..], addKeywords?: [..], removeKeywords?: [..]}",
+            "{ids?, title?, caption?, altText?, extendedDescription?, copyright?, creator?, location?, city?, state?, country?, gps?: \"lat, lon\" | [lat, lon] | null, keywords?: [..], addKeywords?: [..], removeKeywords?: [..]}",
             has_selection,
             |s, p| {
                 let strs =
                     |k: &str| p.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>());
                 let targets = s.targets(p);
+                // GPS: "lat, lon" (decimal or 51°30'26"N 0°7'39"W), [lat, lon], or null / "" to clear
+                let gps: Option<Option<(f64, f64)>> = match p.get("gps") {
+                    None => None,
+                    Some(Value::Null) => Some(None),
+                    Some(Value::String(t)) if t.trim().is_empty() => Some(None),
+                    Some(Value::String(t)) => Some(Some(
+                        parse_gps(t).ok_or_else(|| bad("photo.setMeta", format!("can't read `{t}` as coordinates (e.g. 51.5072, -0.1276)")))?,
+                    )),
+                    Some(Value::Array(a)) if a.len() == 2 => match (a[0].as_f64(), a[1].as_f64()) {
+                        (Some(la), Some(lo)) if la.abs() <= 90.0 && lo.abs() <= 180.0 => Some(Some((la, lo))),
+                        _ => return Err(bad("photo.setMeta", "gps is [latitude, longitude] in degrees")),
+                    },
+                    Some(_) => return Err(bad("photo.setMeta", "gps is \"lat, lon\", [lat, lon] or null")),
+                };
                 let mut ops = Vec::new();
                 for id in targets {
                     let Some(ph) = s.catalog.photo(id) else { continue };
                     let mut m = ph.meta.clone();
+                    if let Some(g) = gps {
+                        m.gps = g;
+                    }
                     for (k, field) in [
                         ("title", &mut m.title),
                         ("caption", &mut m.caption),
@@ -411,6 +428,11 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
                 let n = ops.len();
                 s.commit("Edit Info", Op::Batch { ops })?;
+                // keywords just added become the Recent Keywords set
+                let added: Vec<String> = strs("addKeywords").unwrap_or_default().into_iter().chain(strs("keywords").unwrap_or_default()).collect();
+                if n > 0 && !added.is_empty() {
+                    crate::cmd::keywords::note_recent(s, &added);
+                }
                 Ok(json!({"changed": n}))
             }
         ),
@@ -427,7 +449,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let cover = photos.first().copied();
             s.commit(
                 if folder { "New Folder" } else { "New Album" },
-                Op::AddAlbum { album: Album { id, name, parent, folder, photos, cover, smart: None } },
+                Op::AddAlbum { album: Album { id, name, parent, folder, photos, cover, smart: None, quick: false } },
             )?;
             Ok(json!({"id": id.0}))
         }),
@@ -436,7 +458,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Smart Album…",
             [],
             None,
-            "{name, rules?: partial Filter (rating, ratingOp, flag, label, kind, edited, keyword, camera, lens, dateFrom, dateTo, date, text, album), parent?: folderId} — without `rules`, saves the current view (source + filter)",
+            "{name, rules?: partial Filter (rating, ratingOp, flag, label, kind, edited, keyword, camera, lens, dateFrom, dateTo, date, text, album, ruleSet: {match: all|any|none, rules: [{field, op, value} | {group: ruleSet}]} — see album.ruleFields), parent?: folderId} — without `rules`, saves the current view (source + filter)",
             always,
             |s, p| {
                 let name = str_param(p, "name").unwrap_or("Smart Album").trim().to_string();
@@ -454,6 +476,27 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"id": id.0, "count": s.catalog.album_count(id)}))
             }
         ),
+        cmd!(query "album.ruleFields", "Smart Album Rule Fields", [], None, "{} → [{field, label, kind, ops: [{op, label}], choices?}] for ruleSet rules", always, |_, _| {
+            use lightcraft_catalog::rules::{FIELDS, Kind, ops_for};
+            Ok(json!(FIELDS
+                .iter()
+                .map(|(id, label, kind)| {
+                    let k = match kind {
+                        Kind::Text => "text",
+                        Kind::Keywords => "keywords",
+                        Kind::Number => "number",
+                        Kind::Date => "date",
+                        Kind::Choice(_) => "choice",
+                        Kind::Bool => "bool",
+                    };
+                    let mut v = json!({"field": id, "label": label, "kind": k, "ops": ops_for(*kind).iter().map(|(o, l)| json!({"op": o, "label": l})).collect::<Vec<_>>()});
+                    if let Kind::Choice(c) = kind {
+                        v["choices"] = json!(c);
+                    }
+                    v
+                })
+                .collect::<Vec<_>>()))
+        }),
         cmd!(
             "album.setRules",
             "Edit Smart Album",
@@ -513,6 +556,145 @@ pub fn specs() -> Vec<CommandSpec> {
             s.commit("Add to Album", Op::Batch { ops: vec![Op::SetAlbumPhotos { id, photos }, Op::SetAlbumCover { id, cover }] })?;
             Ok(json!({"added": added}))
         }),
+        cmd!(
+            "album.toggleTarget",
+            "Add to Target Album",
+            [],
+            None,
+            "{ids?} — B: adds the photos to the target album (the Quick Collection unless one is set), or removes them when they're all in it → {album, added}",
+            has_selection,
+            |s, p| {
+                let targets = ids_param(p).unwrap_or_else(|| s.targets(&Value::Null));
+                let target = s.target_album.filter(|a| s.catalog.album(*a).is_some_and(|al| !al.is_smart() && !al.folder));
+                let id = match target.or_else(|| s.catalog.quick_collection()) {
+                    Some(id) => id,
+                    None => {
+                        let id = s.catalog.alloc_album_id();
+                        let album = Album { quick: true, ..Album::new(id, "Quick Collection") };
+                        s.commit("New Quick Collection", Op::AddAlbum { album })?;
+                        id
+                    }
+                };
+                let al = s.catalog.album(id).ok_or_else(|| bad("album.toggleTarget", "no target album"))?;
+                let all_in = !targets.is_empty() && targets.iter().all(|t| al.photos.contains(t));
+                let photos: Vec<PhotoId> = if all_in {
+                    al.photos.iter().copied().filter(|x| !targets.contains(x)).collect()
+                } else {
+                    al.photos.iter().copied().chain(targets.iter().copied().filter(|t| !al.photos.contains(t))).collect()
+                };
+                let name = al.name.clone();
+                let cover = al.cover.filter(|c| photos.contains(c)).or(photos.first().copied());
+                s.commit(
+                    if all_in { "Remove from Target Album" } else { "Add to Target Album" },
+                    Op::Batch { ops: vec![Op::SetAlbumPhotos { id, photos }, Op::SetAlbumCover { id, cover }] },
+                )?;
+                Ok(json!({"album": id.0, "name": name, "added": !all_in, "count": s.catalog.album_count(id)}))
+            }
+        ),
+        cmd!("album.setTarget", "Set as Target Album", [], None, "{id: albumId | null} (null = the Quick Collection)", always, |s, p| {
+            s.target_album = match p.get("id").and_then(Value::as_u64) {
+                Some(a) => {
+                    let id = AlbumId(a);
+                    let al = s.catalog.album(id).ok_or_else(|| bad("album.setTarget", "no such album"))?;
+                    if al.is_smart() || al.folder {
+                        return Err(bad("album.setTarget", "smart albums and folders can't hold photos"));
+                    }
+                    Some(id)
+                }
+                None => None,
+            };
+            Ok(json!({"target": s.target_album.map(|a| a.0)}))
+        }),
+        cmd!("album.clearQuick", "Clear Quick Collection", [], None, "{}", always, |s, _| {
+            let Some(id) = s.catalog.quick_collection() else { return ok() };
+            s.commit(
+                "Clear Quick Collection",
+                Op::Batch { ops: vec![Op::SetAlbumPhotos { id, photos: vec![] }, Op::SetAlbumCover { id, cover: None }] },
+            )?;
+            ok()
+        }),
+        cmd!(
+            "library.autoImport",
+            "Auto Import Settings",
+            [],
+            None,
+            "{folder?: path | null (off), copy?: bool (copy into the library's Originals, else add in place), album?: name | null} — a watched folder whose new photos are added as they arrive (library.autoImportScan; the app scans every few seconds) → the settings",
+            always,
+            |s, p| {
+                if let Some(f) = p.get("folder") {
+                    s.import_defaults.auto_folder = match f.as_str().map(str::trim).filter(|f| !f.is_empty()) {
+                        Some(f) if std::path::Path::new(f).is_dir() || cfg!(target_arch = "wasm32") => Some(f.to_string()),
+                        Some(f) => return Err(bad("library.autoImport", format!("`{f}` is not a folder"))),
+                        None => None,
+                    };
+                }
+                if let Some(c) = p.get("copy").and_then(Value::as_bool) {
+                    s.import_defaults.auto_copy = c;
+                }
+                if let Some(a) = p.get("album") {
+                    s.import_defaults.auto_album = a.as_str().map(str::trim).filter(|a| !a.is_empty()).map(str::to_string);
+                }
+                s.save_prefs()?;
+                let d = &s.import_defaults;
+                Ok(json!({"folder": d.auto_folder, "copy": d.auto_copy, "album": d.auto_album}))
+            }
+        ),
+        cmd!(
+            "library.autoImportScan",
+            "Auto Import Now",
+            [],
+            None,
+            "{} — add the watched folder's new photos (files the library doesn't have yet; partial / still-copying files wait for the next scan) → {imported, folder}",
+            always,
+            |s, _| {
+                let Some(folder) = s.import_defaults.auto_folder.clone() else { return Ok(json!({"imported": [], "folder": null})) };
+                // only files that stopped growing: a file still being written is left for later
+                let known: std::collections::HashSet<String> = s
+                    .catalog
+                    .photos()
+                    .filter_map(|p| match &p.source {
+                        lightcraft_catalog::Source::File { path } => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut fresh = Vec::new();
+                for e in std::fs::read_dir(&folder).map_err(|e| bad("library.autoImportScan", format!("{folder}: {e}")))?.flatten() {
+                    let path = e.path();
+                    let ps = path.to_string_lossy().to_string();
+                    if !path.is_file() || known.contains(&ps) || path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                        continue;
+                    }
+                    // each file is tried once (a non-photo isn't retried every scan)
+                    if s.auto_import_seen.get(&ps) == Some(&u64::MAX) {
+                        continue;
+                    }
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    let seen = s.auto_import_seen.insert(ps.clone(), size);
+                    if size > 0 && seen == Some(size) {
+                        fresh.push(ps);
+                    }
+                }
+                if fresh.is_empty() {
+                    return Ok(json!({"imported": [], "folder": folder}));
+                }
+                let mode = if s.import_defaults.auto_copy { "copy" } else { "add" };
+                let mut params = json!({"paths": fresh, "mode": mode});
+                if let Some(a) = s.import_defaults.auto_album.clone() {
+                    match s.catalog.albums().find(|al| al.name.eq_ignore_ascii_case(&a) && !al.folder && !al.is_smart()) {
+                        Some(al) => params["album"] = json!(al.id.0),
+                        None => params["albumName"] = json!(a),
+                    }
+                }
+                for f in &fresh {
+                    s.auto_import_seen.insert(f.clone(), u64::MAX);
+                }
+                let sel = s.selection.clone();
+                let r = s.execute("library.import", &params)?;
+                // arriving photos don't take over the selection
+                s.selection = sel;
+                Ok(json!({"imported": r["imported"], "folder": folder}))
+            }
+        ),
         cmd!("album.removePhotos", "Remove from Album", [], None, "{id: albumId, ids?}", has_selection, |s, p| {
             let id = album_param(p, "id", "album.removePhotos")?;
             let targets = ids_param(p).unwrap_or_else(|| s.targets(&Value::Null));
@@ -553,7 +735,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Photos…",
             ["File"],
             Some("Cmd+Shift+I"),
-            "{paths: [file or folder (recursive)], mode?: add|copy (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..]} → {imported, duplicates, failed, album?}",
+            "{paths: [file or folder (recursive)], mode?: add|copy (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/), destination?: folder for copies, organize?: date|month|flat, rename?: file-name template for copies ({name} {seq:N} {date:%Y%m%d} {camera} {title}), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..]} → {imported, duplicates, failed, album?}",
             always,
             |s, p| {
                 let paths = strs(p, "paths");
@@ -577,7 +759,30 @@ pub fn specs() -> Vec<CommandSpec> {
                 {
                     return Err(bad("library.import", "album must be a regular album"));
                 }
-                let opts = crate::import::ImportOptions { mode, preset, keywords: strs(p, "keywords"), ..Default::default() };
+                let organize = match str_param(p, "organize") {
+                    Some(o) => {
+                        crate::import::Organize::parse(o).ok_or_else(|| bad("library.import", format!("unknown organize `{o}` (date|month|flat)")))?
+                    }
+                    None => Default::default(),
+                };
+                let metadata_preset = str_param(p, "metadataPreset").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+                if let Some(n) = &metadata_preset
+                    && !s.metadata_presets.iter().any(|m| m.name.eq_ignore_ascii_case(n))
+                {
+                    return Err(bad("library.import", format!("unknown metadata preset `{n}`")));
+                }
+                let opts = crate::import::ImportOptions {
+                    mode,
+                    preset,
+                    keywords: strs(p, "keywords"),
+                    destination: str_param(p, "destination").map(str::to_string),
+                    organize,
+                    rename: str_param(p, "rename").map(str::to_string),
+                    rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
+                    metadata_preset,
+                    convert_dng: super::bool_or(p, "dng", false),
+                    ..Default::default()
+                };
                 let undo0 = s.undo.len();
                 let mut report = serde_json::to_value(crate::import::import_with(s, &paths, &opts)?).unwrap_or_default();
                 let imported: Vec<u64> = report["imported"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
@@ -591,6 +796,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Some(a) = album
                     && !imported.is_empty()
                 {
+                    // (album.addPhotos wants a selection: the new photos are about to be it)
+                    s.selection = Selection::single(PhotoId(imported[0]));
                     s.execute("album.addPhotos", &json!({"id": a, "ids": imported}))?;
                     report["album"] = json!(a);
                 }
@@ -662,7 +869,11 @@ pub fn specs() -> Vec<CommandSpec> {
 fn merge_rules(base: &lightcraft_catalog::Filter, patch: &Value, c: &str) -> Result<lightcraft_catalog::Filter> {
     let mut v = serde_json::to_value(base).unwrap_or_default();
     lightcraft_develop::presets::deep_merge(&mut v, patch);
-    serde_json::from_value(v).map_err(|e| bad(c, e.to_string()))
+    let f: lightcraft_catalog::Filter = serde_json::from_value(v).map_err(|e| bad(c, e.to_string()))?;
+    if let Some(problem) = f.rule_set.as_ref().and_then(|r| r.problems().into_iter().next()) {
+        return Err(bad(c, problem));
+    }
+    Ok(f)
 }
 
 /// The current view (source + filter) as smart-album rules. Viewing a smart album starts from
@@ -705,4 +916,49 @@ impl Session {
 
 fn has_library(s: &Session) -> std::result::Result<(), String> {
     if s.library.is_some() { Ok(()) } else { Err("no library is open (in-memory session)".into()) }
+}
+
+/// Coordinates typed by a person: "51.5072, -0.1276", "51.5072 N 0.1276 W",
+/// "51°30'26\"N 0°7'39\"W" (degrees, minutes, seconds; N/S/E/W or signs).
+pub(crate) fn parse_gps(t: &str) -> Option<(f64, f64)> {
+    let t = t.trim();
+    // split into the two coordinates: at a comma, else after the first N/S hemisphere letter
+    let (a, b) = match t.split_once(',') {
+        Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+        None => {
+            let i = t.find(['N', 'S', 'n', 's']).map(|i| i + 1).or_else(|| t.find(char::is_whitespace))?;
+            (t[..i].trim().to_string(), t[i..].trim().to_string())
+        }
+    };
+    let one = |s: &str, pos: char, neg: char| -> Option<f64> {
+        let up = s.to_ascii_uppercase();
+        let sign = if up.contains(neg) || up.trim_start().starts_with('-') { -1.0 } else { 1.0 };
+        let nums: Vec<f64> =
+            up.split(|c: char| !(c.is_ascii_digit() || c == '.')).filter(|x| !x.is_empty()).map(|x| x.parse::<f64>().ok()).collect::<Option<_>>()?;
+        let v = match nums.as_slice() {
+            [d] => *d,
+            [d, m] => d + m / 60.0,
+            [d, m, s] => d + m / 60.0 + s / 3600.0,
+            _ => return None,
+        };
+        let _ = pos;
+        Some(sign * v)
+    };
+    let (la, lo) = (one(&a, 'N', 'S')?, one(&b, 'E', 'W')?);
+    (la.abs() <= 90.0 && lo.abs() <= 180.0).then_some((la, lo))
+}
+
+#[cfg(test)]
+mod gps_tests {
+    #[test]
+    fn coordinates_people_type() {
+        let p = super::parse_gps;
+        assert_eq!(p("51.5072, -0.1276"), Some((51.5072, -0.1276)));
+        let (la, lo) = p("51°30'26\"N 0°7'39\"W").unwrap();
+        assert!((la - 51.50722).abs() < 1e-4 && (lo + 0.1275).abs() < 1e-4, "{la} {lo}");
+        let (la, lo) = p("33.8688 S, 151.2093 E").unwrap();
+        assert!((la + 33.8688).abs() < 1e-9 && (lo - 151.2093).abs() < 1e-9);
+        assert_eq!(p("95, 10"), None);
+        assert_eq!(p("hello"), None);
+    }
 }

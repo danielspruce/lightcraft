@@ -306,6 +306,20 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let map = CanvasMap::new(&frame, img_rect);
     let resp = ui.interact(canvas, egui::Id::new("loupe"), Sense::click_and_drag());
     info_overlay(app, &p, canvas, &photo);
+    // a fine grid while a transform (geometry) slider is dragged, to judge verticals
+    if app.ui.dragging_control.as_deref().is_some_and(|c| c.starts_with("geometry.")) {
+        let n = 12;
+        let stroke = Stroke::new(1.0, Color32::from_white_alpha(70));
+        for i in 1..n {
+            let fx = img_rect.left() + img_rect.width() * i as f32 / n as f32;
+            p.line_segment([pos2(fx, img_rect.top()), pos2(fx, img_rect.bottom())], stroke);
+        }
+        let rows = ((n as f32) * img_rect.height() / img_rect.width()).round().max(2.0) as usize;
+        for i in 1..rows {
+            let fy = img_rect.top() + img_rect.height() * i as f32 / rows as f32;
+            p.line_segment([pos2(img_rect.left(), fy), pos2(img_rect.right(), fy)], stroke);
+        }
+    }
     match right {
         RightPanel::Crop => crop_overlay(app, ui, &resp, &map, &frame, &d, id),
         RightPanel::Masking => mask_overlay(app, ui, &resp, &map, &d),
@@ -533,6 +547,20 @@ fn general_interaction(
         targeted_drag(app, ui, resp, map, &target);
         return;
     }
+    if app.ui.tool == "colorRange" {
+        // click: sample the colour for the selected mask's colour range; ⇧-click adds (up to 5)
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        if resp.clicked()
+            && let Some(q) = resp.interact_pointer_pos()
+        {
+            let n = map.norm(q);
+            let add = ui.input(|i| i.modifiers.shift);
+            if let Err(e) = app.run("mask.sampleColor", json!({"x": n.x, "y": n.y, "add": add})) {
+                app.toast(ui.ctx(), e);
+            }
+        }
+        return;
+    }
     if app.ui.tool == "pointColor" {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         if resp.clicked()
@@ -577,8 +605,17 @@ fn crop_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
         return;
     }
     if app.ui.tool == "straighten" {
-        straighten_overlay(app, ui, resp);
+        straighten_overlay(app, ui, resp, false);
         return;
+    }
+    // hold ⌘ and drag: draw a straighten line without leaving the crop tool
+    let cmd_drag = resp.drag_started() && ui.input(|i| i.modifiers.command);
+    if cmd_drag || matches!(app.gesture, Some(Gesture::StraightenLine { .. })) {
+        straighten_overlay(app, ui, resp, true);
+        return;
+    }
+    if resp.hovered() && ui.input(|i| i.modifiers.command) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     let quad = frame_crop_quad(d, frame);
     let pts: Vec<Pos2> = quad.iter().map(|q| map.screen(*q)).collect();
@@ -1227,9 +1264,10 @@ fn film_badges(p: &egui::Painter, t: &Tokens, fr: Rect, ph: &lightcraft_catalog:
 
 /// Straighten tool: drag along a horizon (or a vertical) to set the crop angle; double-click = Auto.
 /// The image is shown unrotated in the crop view, so the line's on-screen angle is its image angle.
-fn straighten_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response) {
+/// `held`: drawn with ⌘ held in the crop tool, which stays active afterwards.
+fn straighten_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response, held: bool) {
     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    if resp.double_clicked() {
+    if !held && resp.double_clicked() {
         let _ = app.run("crop.autoStraighten", json!({}));
         app.ui.tool.clear();
         app.gesture = None;
@@ -1259,6 +1297,8 @@ fn straighten_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::R
             }
             let _ = app.run("crop.straighten", json!({"angle": (-deg * 100.0).round() / 100.0}));
         }
-        app.ui.tool.clear();
+        if !held {
+            app.ui.tool.clear();
+        }
     }
 }

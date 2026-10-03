@@ -249,3 +249,199 @@ fn demo_photos_have_no_sidecar() {
     assert_eq!(r["written"].as_array().unwrap().len(), 0);
     assert_eq!(r["failed"].as_array().unwrap().len(), 1);
 }
+
+/// All Metadata: EXIF rows from the file and its XMP, for a photo on disk.
+#[test]
+fn all_metadata_lists_exif_and_xmp() {
+    let dir = temp_dir("allmeta");
+    let path = dir.join("tagged.jpg");
+    let img = lightcraft_raster::Rgba8 { width: 16, height: 8, data: vec![[90, 120, 200, 255]; 128] };
+    let exif = lightcraft_meta::write_exif(&lightcraft_meta::Metadata { make: Some("Maker".into()), iso: Some(800), ..Default::default() });
+    let meta = lightcraft_codecs::EncodeMeta { exif: Some(&exif), ..Default::default() };
+    let jpg = lightcraft_codecs::encode_jpeg(&lightcraft_codecs::EncodeImage::rgba8(&img), 90, Default::default(), &meta).unwrap();
+    std::fs::write(&path, jpg).unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [path.to_string_lossy()]})).unwrap();
+    s.execute("photo.setMeta", &json!({"title": "A title"})).unwrap();
+    s.execute("photo.saveMetadataToFile", &json!({})).unwrap();
+    let r = s.execute("photo.allMetadata", &json!({})).unwrap();
+    let exif = r["exif"].as_array().unwrap();
+    assert!(exif.iter().any(|e| e["name"] == "Make" && e["value"] == "Maker"), "{r}");
+    assert!(exif.iter().any(|e| e["name"] == "ISO Speed" && e["value"] == "800"));
+    assert!(r["xmp"].as_array().unwrap().iter().any(|x| x["name"] == "dc:title" && x["value"] == "A title"), "the sidecar's fields: {r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Convert to DNG: a corpus raw (skipped without the corpus) becomes a DNG next to it with the
+/// photo relinked and its edits kept; undo goes back to the original; non-raws are skipped.
+#[test]
+fn convert_raw_to_dng() {
+    let corpus = std::env::var_os("LIGHTCRAFT_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"))
+        .join("raw/nef-nikon-d5100-uncompressed.nef");
+    let mut s = Session::new().with_fs();
+    // a non-raw is skipped
+    let dir = temp_dir("todng");
+    let png = dir.join("a.png");
+    write_png(&png, 3);
+    s.execute("library.import", &json!({"paths": [png.to_string_lossy()]})).unwrap();
+    let r = s.execute("photo.convertToDng", &json!({})).unwrap();
+    assert_eq!((r["converted"].as_array().unwrap().len(), r["skipped"].as_array().unwrap().len()), (0, 1));
+    if !corpus.exists() {
+        eprintln!("skip: {} absent", corpus.display());
+        return;
+    }
+    let nef = dir.join("shot.nef");
+    std::fs::copy(&corpus, &nef).unwrap();
+    s.execute("library.import", &json!({"paths": [nef.to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.6})).unwrap();
+    let r = s.execute("photo.convertToDng", &json!({})).unwrap();
+    assert_eq!(r["converted"].as_array().unwrap().len(), 1, "{r}");
+    let p = s.catalog.photo(id).unwrap().clone();
+    assert_eq!((p.file_name.as_str(), p.format.as_str()), ("shot.dng", "DNG"));
+    assert!(dir.join("shot.dng").exists() && nef.exists(), "the original is kept");
+    assert_eq!(p.develop.light.exposure, 0.6, "edits kept");
+    let bytes = std::fs::read(dir.join("shot.dng")).unwrap();
+    assert_eq!(lightcraft_raw::probe(&bytes), Some(lightcraft_raw::RawFormat::Dng));
+    assert!(s.render_now(id, 64, 64).is_ok(), "the DNG renders");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.catalog.photo(id).unwrap().file_name, "shot.nef");
+    // Copy as DNG at import: only the DNG lands in the destination
+    let card = dir.join("card");
+    std::fs::create_dir_all(&card).unwrap();
+    std::fs::copy(&corpus, card.join("DSC_1.NEF")).unwrap();
+    let dest = dir.join("dest");
+    let mut s = Session::new().with_fs();
+    let r = s
+        .execute(
+            "library.import",
+            &json!({"paths": [card.to_string_lossy()], "mode": "copy", "destination": dest.to_string_lossy(), "organize": "flat", "dng": true}),
+        )
+        .unwrap();
+    assert_eq!(r["imported"].as_array().unwrap().len(), 1, "{r}");
+    let names: Vec<String> = std::fs::read_dir(&dest).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(names, ["DSC_1.dng"]);
+    assert!(card.join("DSC_1.NEF").exists(), "the card is untouched");
+    let id2 = lightcraft_catalog::PhotoId(r["imported"][0].as_u64().unwrap());
+    assert_eq!(s.catalog.photo(id2).unwrap().format, "DNG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Edit in External Editor (engine half): a 16-bit TIFF `-Edit` copy with the edits, next to
+/// the original, added and stacked on top of it; a second one doesn't overwrite the first.
+#[test]
+fn external_edit_copy_is_stacked() {
+    let dir = temp_dir("extedit");
+    let src = dir.join("beach.png");
+    write_png(&src, 9);
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    let orig = s.active().unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 1.0})).unwrap();
+    let r = s.execute("photo.editExternal", &json!({})).unwrap();
+    let path = r["path"].as_str().unwrap().to_string();
+    assert!(path.ends_with("beach-Edit.tif"), "{path}");
+    let bytes = std::fs::read(&path).unwrap();
+    let d = lightcraft_codecs::decode(&bytes, Default::default()).unwrap();
+    assert_eq!(d.bit_depth, 16);
+    let new = lightcraft_catalog::PhotoId(r["id"].as_u64().unwrap());
+    assert_eq!(s.active(), Some(new));
+    let st = s.catalog.stack_of(new).expect("stacked");
+    assert_eq!((st.top(), st.photos.contains(&orig)), (new, true));
+    let r2 = s.execute("photo.editExternal", &json!({"colorSpace": "proPhoto"})).unwrap();
+    assert!(r2["path"].as_str().unwrap().ends_with("beach-Edit-Edit.tif") || r2["path"].as_str().unwrap().contains("-2"), "{r2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reload: a file changed on disk (an external editor saved it) gets its new size / hash, the
+/// cached source is dropped and renders change; unchanged files are left alone.
+#[test]
+fn reload_picks_up_changed_files() {
+    let dir = temp_dir("reload");
+    let f = dir.join("x.png");
+    write_png(&f, 10);
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [f.to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    let before = s.render_now(id, 32, 32).unwrap().image.data;
+    let key0 = s.thumb_job(id, 128).unwrap().key;
+    assert_eq!(s.execute("photo.reload", &json!({})).unwrap()["reloaded"], json!([]), "unchanged");
+    write_png(&f, 200);
+    let r = s.execute("photo.reload", &json!({})).unwrap();
+    assert_eq!(r["reloaded"], json!([id.0]));
+    assert_ne!(s.thumb_job(id, 128).unwrap().key, key0, "the UI sees a new render key");
+    assert_ne!(s.render_now(id, 32, 32).unwrap().image.data, before, "renders the new pixels");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn duplicate_copies_the_file_and_the_edits() {
+    let dir = temp_dir("dup");
+    let f = dir.join("pic.png");
+    write_png(&f, 5);
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [f.to_string_lossy()]})).unwrap();
+    let orig = s.active().unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.8})).unwrap();
+    s.execute("photo.rate", &json!({"rating": 4})).unwrap();
+    let alb = s.execute("album.create", &json!({"name": "Keep", "addSelected": true})).unwrap()["id"].as_u64().unwrap();
+    let r = s.execute("photo.duplicate", &json!({})).unwrap();
+    let dup = lightcraft_catalog::PhotoId(r["ids"][0].as_u64().unwrap());
+    let d = s.catalog.photo(dup).unwrap().clone();
+    assert_eq!(d.file_name, "pic-copy.png");
+    assert!(dir.join("pic-copy.png").exists());
+    assert_eq!((d.develop.light.exposure, d.rating), (0.8, 4));
+    assert_eq!(s.catalog.album_count(lightcraft_catalog::AlbumId(alb)), 2);
+    assert_ne!(dup, orig);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(s.catalog.photo(dup).is_none(), "one undo step");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gps_typed_in_is_saved_to_xmp() {
+    let mut s = Session::with_demo();
+    let id = s.active().unwrap_or_else(|| s.catalog.photos().next().unwrap().id);
+    s.execute("library.select", &json!({"ids": [id.0]})).unwrap();
+    s.execute("photo.setMeta", &json!({"gps": "48°51'30\"N 2°17'40\"E"})).unwrap();
+    let (la, lo) = s.catalog.photo(id).unwrap().meta.gps.unwrap();
+    assert!((la - 48.8583).abs() < 1e-3 && (lo - 2.2944).abs() < 1e-3, "{la} {lo}");
+    let x = crate::sidecar::sidecar_packet(s.catalog.photo(id).unwrap(), &s.catalog);
+    let back = lightcraft_meta::parse_xmp(&x).unwrap().metadata.gps.unwrap();
+    assert!((back.latitude - la).abs() < 1e-5 && (back.longitude - lo).abs() < 1e-5);
+    assert!(s.execute("photo.setMeta", &json!({"gps": "north pole-ish"})).is_err());
+    s.execute("photo.setMeta", &json!({"gps": null})).unwrap();
+    assert!(s.catalog.photo(id).unwrap().meta.gps.is_none());
+}
+
+/// DNG export compression: lossless, zip and none all decode; none is the biggest.
+#[test]
+fn dng_export_compression_choices() {
+    let corpus = std::env::var_os("LIGHTCRAFT_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"))
+        .join("raw/nef-nikon-d5100-uncompressed.nef");
+    if !corpus.exists() {
+        eprintln!("skip: {} absent", corpus.display());
+        return;
+    }
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [corpus.to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    let mut sizes = Vec::new();
+    for c in ["lossless", "deflate", "uncompressed"] {
+        let o = crate::export::ExportOptions::from_json(&json!({"format": "dng", "dngCompression": c}));
+        let mut out = Vec::new();
+        let mut write = |_: &str, b: &[u8]| {
+            out = b.to_vec();
+            Ok(())
+        };
+        crate::export::export_batch(&mut s, &[id], &o, &crate::export::Destination { dir: "x".into(), exact: None }, &mut write, &|_| false).unwrap();
+        let raw = lightcraft_raw::decode(&out).unwrap_or_else(|e| panic!("{c}: {e}"));
+        assert!(raw.width > 1000, "{c}");
+        sizes.push((c, out.len()));
+    }
+    assert!(sizes[2].1 > sizes[0].1 && sizes[2].1 > sizes[1].1, "uncompressed is the biggest: {sizes:?}");
+}

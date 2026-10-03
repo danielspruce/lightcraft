@@ -83,13 +83,36 @@ Values pass through our control specs, so anything outside our slider ranges get
 **Not mapped:** camera profiles and looks (`CameraProfile`, `Look`; we have our own profile set), local adjustments
 (masks, gradients, brushes), spot removal, red eye, lens blur, process-version 2010 field names, and AI features.
 
+## Local corrections (masks)
+
+Masks stored as `crs:` structures are read from sidecars, DNG-embedded XMP, XMP presets and `.lrtemplate` files
+(`crates/engine/src/crs_masks.rs`). Four containers hold them: `MaskGroupBasedCorrections` (current) and the older
+`GradientBasedCorrections`, `CircularGradientBasedCorrections` and `PaintBasedCorrections`. Each correction becomes one
+mask: `CorrectionName` → name, `CorrectionAmount` → Amount, inactive corrections are skipped.
+
+| Field | Ours | Notes |
+|---|---|---|
+| `LocalExposure2012` | `adjust.exposure` | stored as a fraction, ×4 EV |
+| `LocalContrast2012`, `LocalHighlights2012`, `LocalShadows2012`, `LocalWhites2012`, `LocalBlacks2012`, `LocalClarity2012`, `LocalTexture`, `LocalDehaze`, `LocalTemperature`, `LocalTint`, `LocalSaturation`, `LocalHue`, `LocalSharpness`, `LocalLuminanceNoise`, `LocalMoire`, `LocalDefringe`, `LocalToningSaturation` | the matching `adjust.*` | stored −1..1, ×100 |
+| `LocalToningHue` | `adjust.color_hue` | degrees |
+| `Mask/Gradient` (`FullX/Y`, `ZeroX/Y`) | linear gradient | full effect at the Full point |
+| `Mask/CircularGradient` (`Top/Left/Bottom/Right`, `Angle`, `Feather`, `Flipped`) | radial gradient | box fractions → long-edge radii (presets assume 3:2; sidecars use the photo's shape); `Flipped` → invert |
+| `Mask/Paint` (`Dabs` "d x y", `Radius`, `Flow`, `CenterWeight`, `MaskValue`) | brush | one brush component per correction; `MaskValue` ≤ 0 erases |
+| `Mask/Image` `MaskSubType` 1 / 2 | Subject / Sky | other AI selections are reported, not guessed |
+| `Mask/RangeMask` `Type` 2 / 3 (`LumRange`, `DepthRange`) | luminance / depth range | lightness converted to our range scale; colour ranges are reported |
+| `MaskBlendMode` 0 / 1 / 2, `MaskInverted` | add / subtract / intersect, invert | |
+
+Applying a preset adds its masks to the photo's own (masks the photo already has are not added twice), and the Amount
+slider scales them. A sidecar's masks replace the photo's, because a sidecar holds the whole edit. Components we can't
+carry over are listed in `preset.import`'s `unmapped` as `Mask: <kind>`.
+
 ## Preset files
 
 | | |
 |---|---|
 | Ours: `.lcpreset` | JSON `{"format": "lightcraft.preset", "version": 1, "presets": [{id, name, group, settings}]}`, where `settings` is a partial develop-settings object (only the groups the preset includes). A file can hold one preset or many, and every preset keeps its group. Import also accepts a bare preset object or an array of them. |
 | Export | `preset.export {path, ids?, group?}`: all user presets by default, or the given ids or one group. In the app: File ▸ Export Presets…, Presets panel ▸ ⋯ ▸ Export User Presets…, or right-click a group ▸ Export Group…. |
-| Import | `preset.import {paths}`: files or folders (recursive), `.lcpreset` and `.xmp`. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
+| Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, `Look`, local masks), and the app's toast names them. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
 | XMP presets | Read with the `crs:` table above, with `crs:Name` as the name (falling back to the file name) and `crs:Group` as the group (falling back to "Imported Presets"). Only the fields the preset sets are included, so applying it leaves everything else alone and the Amount slider scales it like any other preset. We only read XMP presets; we don't write them. |
 
 LightCraft ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).

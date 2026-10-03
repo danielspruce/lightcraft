@@ -20,6 +20,16 @@ pub const ALIASES: &[(&str, &str, &str)] = &[
     // Shift+[ / Shift+] arrive as { / } on most layouts
     ("Shift+{", "brush.featherLess", "{}"),
     ("Shift+}", "brush.featherMore", "{}"),
+    // keyword set: ⌥1–⌥9 toggle the current set's keywords on the selection
+    ("Alt+1", "keyword.toggleFromSet", r#"{"index": 1}"#),
+    ("Alt+2", "keyword.toggleFromSet", r#"{"index": 2}"#),
+    ("Alt+3", "keyword.toggleFromSet", r#"{"index": 3}"#),
+    ("Alt+4", "keyword.toggleFromSet", r#"{"index": 4}"#),
+    ("Alt+5", "keyword.toggleFromSet", r#"{"index": 5}"#),
+    ("Alt+6", "keyword.toggleFromSet", r#"{"index": 6}"#),
+    ("Alt+7", "keyword.toggleFromSet", r#"{"index": 7}"#),
+    ("Alt+8", "keyword.toggleFromSet", r#"{"index": 8}"#),
+    ("Alt+9", "keyword.toggleFromSet", r#"{"index": 9}"#),
 ];
 
 pub fn parse(s: &str) -> Option<(Modifiers, Key)> {
@@ -130,6 +140,15 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
         }
     };
     for (id, params) in aliased {
+        // Space pauses / resumes a slideshow
+        if id == "view.zoomToggle"
+            && let Some((interval, _, paused)) = app.ui.slideshow
+        {
+            let now = ctx.input(|i| i.time);
+            app.ui.slideshow = Some((interval, now + interval, !paused));
+            app.toast(ctx, if paused { "Slideshow resumed" } else { "Slideshow paused" });
+            continue;
+        }
         // flag/rate aliases (Shift+X…) go through the culling path: active photo in Compare/Survey,
         // `advance` moves to the next candidate there
         if matches!(id, "photo.flag" | "photo.rate" | "photo.label") {
@@ -191,6 +210,16 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
                     continue;
                 }
             }
+            // B: the brush while editing; in the grids, add to the target album (Quick Collection)
+            if f == "tool.brush" && matches!(app.ui.view, crate::state::ViewMode::PhotoGrid | crate::state::ViewMode::SquareGrid) {
+                if let Ok(r) = app.run("album.toggleTarget", json!({})) {
+                    let n = app.session.targets(&json!({})).len();
+                    let what = if n == 1 { "photo".to_string() } else { format!("{n} photos") };
+                    let name = r["name"].as_str().unwrap_or("Quick Collection").to_string();
+                    app.toast(ctx, if r["added"] == true { format!("Added {what} to {name}") } else { format!("Removed {what} from {name}") });
+                }
+                continue;
+            }
             // X is both reject (library) and swap crop aspect (crop tool)
             if f == "photo.reject" && app.ui.right == crate::state::RightPanel::Crop {
                 let _ = app.run("crop.rotateAspect", json!({}));
@@ -204,9 +233,9 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let _ = app.run("spot.refreshSource", json!({}));
                 continue;
             }
-            // Shift+O cycles the mask overlay mode while masking (the crop overlay elsewhere)
+            // Shift+O cycles the mask overlay colour while masking (the crop overlay elsewhere)
             if f == "view.cropOverlay" && app.ui.right == crate::state::RightPanel::Masking {
-                let _ = app.run("view.maskOverlayMode", json!({}));
+                let _ = app.run("view.maskOverlayColor", json!({}));
                 continue;
             }
             // while cropping: O cycles the guides, Shift+O their orientation, A locks the aspect

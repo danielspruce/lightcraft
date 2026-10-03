@@ -138,6 +138,8 @@ pub struct AppSettings {
     pub gpu: bool,
     /// Largest long edge (pixels) the loupe renders at.
     pub preview_edge: u32,
+    /// Edit in External Editor: the application ("" = the system's default for TIFF files).
+    pub external_editor: String,
     /// Memory the caches may hold together, in MB (0 = automatic; `app.memoryBudget`).
     pub memory_mb: u32,
     /// Filmstrip: file names above the thumbnails.
@@ -156,6 +158,7 @@ impl Default for AppSettings {
             confirm_delete: false,
             gpu: true,
             preview_edge: 2560,
+            external_editor: String::new(),
             memory_mb: 0,
             film_names: true,
             film_badges: true,
@@ -170,6 +173,9 @@ pub const PREVIEW_EDGES: [u32; 4] = [1600, 2560, 3840, 5120];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
+    /// The Build Previews run last announced (its identity, finished?).
+    #[serde(skip)]
+    pub preview_build_seen: Option<(usize, bool)>,
     pub view: ViewMode,
     pub left_panel: bool,
     pub right: RightPanel,
@@ -198,10 +204,27 @@ pub struct UiState {
     pub mask_overlay_color: [u8; 3],
     pub mask_overlay_opacity: f32,
     pub mask_pins: bool,
+    /// The overlay (on, mode) to go back to when Show Luminance Map is turned off.
+    #[serde(skip)]
+    pub luminance_map_restore: Option<(bool, String)>,
     /// Mirroring of the triangle / spiral crop guides (0..4).
     pub crop_overlay_orient: u8,
     pub crop_overlay: CropOverlay,
     pub show_filenames: bool,
+    /// Photo counts next to sources and albums in the left panel.
+    pub show_counts: bool,
+    /// Copies opened in an external editor this session (reloaded when the window is focused
+    /// again), and whether the window had focus last frame.
+    #[serde(skip)]
+    pub external_edits: Vec<u64>,
+    #[serde(skip)]
+    pub was_focused: bool,
+    /// When the watched folder was last scanned (egui time).
+    #[serde(skip)]
+    pub auto_import_at: f64,
+    /// The develop control whose slider is being dragged (geometry sliders show a grid).
+    #[serde(skip)]
+    pub dragging_control: Option<String>,
     pub search: String,
     /// Focus the search field on the next frame (Edit → Find…).
     #[serde(skip)]
@@ -249,6 +272,12 @@ pub struct UiState {
     pub auto_advance: bool,
     /// Full-screen preview (F): the photo alone on black, no chrome.
     pub fullscreen: bool,
+    /// Window ▸ Second Window.
+    pub second_window: bool,
+    /// A running slideshow (full screen): seconds per photo, when the next one is due (egui
+    /// time), paused.
+    #[serde(skip)]
+    pub slideshow: Option<(f64, f64, bool)>,
     /// Info overlay on the loupe.
     pub info_overlay: InfoOverlay,
     /// Navigator mini map in the loupe while zoomed in.
@@ -321,6 +350,8 @@ pub enum Dialog {
     /// Edit the colour label names (red, yellow, green, blue, purple; empty = the colour's name).
     LabelNames {
         names: Vec<String>,
+        /// Also save the names as a label set of this name (empty = don't).
+        save_as: String,
     },
     /// Batch rename the selected photos with a file-name template.
     Rename {
@@ -344,6 +375,24 @@ pub enum Dialog {
     /// Save the current view (source + filter) as a smart album.
     NewSmartAlbum {
         name: String,
+    },
+    /// Help ▸ What's New.
+    WhatsNew,
+    /// Help ▸ System Info: (label, value) rows.
+    SystemInfo {
+        rows: Vec<(String, String)>,
+    },
+    /// Every metadata field of a photo's file (`photo.allMetadata`), filtered by `search`.
+    AllMetadata {
+        title: String,
+        rows: serde_json::Value,
+        search: String,
+    },
+    /// Create (`id` None) or edit a smart album's rules.
+    SmartRules {
+        id: Option<u64>,
+        name: String,
+        rules: lightcraft_catalog::RuleSet,
     },
     /// `groups`: the settings groups the preset includes (`SettingsGroup` ids).
     CreatePreset {
@@ -389,6 +438,8 @@ pub enum Dialog {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            preview_build_seen: None,
+            luminance_map_restore: None,
             view: ViewMode::Detail,
             left_panel: false,
             right: RightPanel::Edit,
@@ -412,6 +463,11 @@ impl Default for UiState {
             crop_overlay: CropOverlay::Thirds,
             crop_overlay_orient: 0,
             show_filenames: true,
+            show_counts: true,
+            dragging_control: None,
+            external_edits: Vec::new(),
+            was_focused: true,
+            auto_import_at: 0.0,
             search: String::new(),
             focus_search: false,
             renaming_mask: None,
@@ -437,6 +493,8 @@ impl Default for UiState {
             spots_threshold: 50.0,
             auto_advance: false,
             fullscreen: false,
+            slideshow: None,
+            second_window: false,
             info_overlay: InfoOverlay::Off,
             navigator: true,
             settings: AppSettings::default(),

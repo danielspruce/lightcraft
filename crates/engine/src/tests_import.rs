@@ -211,3 +211,112 @@ fn recently_added_covers_recent_imports_newest_first() {
     assert_eq!(names, ["new.png", "mid.png"], "the last 30 days, newest import first");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Copy imports: a destination folder, flat / by-month folders, renamed copies (numbered in
+/// import order), and a metadata preset on every photo.
+#[test]
+fn copy_with_destination_organize_rename_and_metadata_preset() {
+    let src = temp_dir("orgsrc");
+    let dest = temp_dir("orgdest");
+    write_png(&src.join("a.png"), 1);
+    write_png(&src.join("b.png"), 2);
+    let mut s = Session::new().with_fs();
+    s.execute("metadata.savePreset", &json!({"name": "Studio", "fields": {"copyright": "© Studio", "creator": "Sam"}})).unwrap();
+    assert!(s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "metadataPreset": "Nope"})).is_err());
+    assert!(s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "mode": "copy", "organize": "weekly"})).is_err());
+    let r = s
+        .execute(
+            "library.import",
+            &json!({"paths": [src.to_string_lossy()], "mode": "copy", "destination": dest.to_string_lossy(), "organize": "flat",
+                    "rename": "Shoot-{seq:3}", "renameStart": 7, "metadataPreset": "Studio"}),
+        )
+        .unwrap();
+    assert_eq!(ids(&r, "imported"), 2, "{r}");
+    let mut names: Vec<String> = s.catalog.photos().map(|p| p.file_name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["Shoot-007.png", "Shoot-008.png"], "catalogued under the new names");
+    assert!(dest.join("Shoot-007.png").exists() && dest.join("Shoot-008.png").exists(), "flat: straight into the destination");
+    assert!(s.catalog.photos().all(|p| p.meta.copyright == "© Studio" && p.meta.creator == "Sam"));
+    // by month, no library needed when a destination is given
+    let dest2 = temp_dir("orgdest2");
+    write_png(&src.join("c.png"), 3);
+    let r = s
+        .execute(
+            "library.import",
+            &json!({"paths": [src.join("c.png").to_string_lossy()], "mode": "copy", "destination": dest2.to_string_lossy(), "organize": "month"}),
+        )
+        .unwrap();
+    assert_eq!(ids(&r, "imported"), 1, "{r}");
+    let p = s.catalog.photos().find(|p| p.file_name == "c.png").unwrap();
+    let lightcraft_catalog::Source::File { path } = &p.source else { panic!() };
+    let rel = Path::new(path).strip_prefix(&dest2).unwrap();
+    assert_eq!(rel.components().count(), 3, "YYYY/YYYY-MM/c.png: {rel:?}");
+    assert_eq!(rel.parent().unwrap().file_name().unwrap().len(), 7);
+    for d in [&src, &dest, &dest2] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// Auto import: files in the watched folder are added once their size held between two scans,
+/// into the named album; non-photos are tried once; the selection stays put.
+#[test]
+fn auto_import_watched_folder() {
+    let dir = temp_dir("watch");
+    let mut s = Session::new().with_fs();
+    assert!(s.execute("library.autoImport", &json!({"folder": dir.join("nope").to_string_lossy()})).is_err());
+    s.execute("library.autoImport", &json!({"folder": dir.to_string_lossy(), "album": "Tethered"})).unwrap();
+    assert_eq!(s.execute("library.autoImportScan", &json!({})).unwrap()["imported"], json!([]));
+    write_png(&dir.join("one.png"), 1);
+    std::fs::write(dir.join("notes.txt"), "not a photo").unwrap();
+    // first sight: wait (it may still be copying)
+    assert_eq!(s.execute("library.autoImportScan", &json!({})).unwrap()["imported"], json!([]));
+    let r = s.execute("library.autoImportScan", &json!({})).unwrap();
+    assert_eq!(r["imported"].as_array().unwrap().len(), 1, "{r}");
+    let album = s.catalog.albums().find(|a| a.name == "Tethered").expect("album").id;
+    assert_eq!(s.catalog.album_count(album), 1);
+    assert!(s.selection.ids.is_empty(), "arrivals don't take the selection");
+    // nothing new: nothing happens, and the text file isn't retried
+    for _ in 0..2 {
+        assert_eq!(s.execute("library.autoImportScan", &json!({})).unwrap()["imported"], json!([]));
+    }
+    write_png(&dir.join("two.png"), 2);
+    s.execute("library.autoImportScan", &json!({})).unwrap();
+    s.execute("library.autoImportScan", &json!({})).unwrap();
+    assert_eq!(s.catalog.album_count(album), 2);
+    s.execute("library.autoImport", &json!({"folder": null})).unwrap();
+    assert_eq!(s.execute("library.autoImportScan", &json!({})).unwrap()["folder"], json!(null));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Smart previews: with the original offline the photo still renders (and edits apply) from
+/// its proxy; without the proxy it can't be opened.
+#[test]
+fn smart_previews_stand_in_for_offline_originals() {
+    let src = temp_dir("smartsrc");
+    let lib = temp_dir("smartlib");
+    write_png(&src.join("a.png"), 7);
+    let mut s = Session::new().with_fs();
+    s.open_library(&lib, false).unwrap();
+    s.execute("library.import", &json!({"paths": [src.join("a.png").to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    let r = s.execute("library.smartPreviews", &json!({})).unwrap();
+    assert_eq!(r["built"], 1, "{r}");
+    assert_eq!(s.execute("photo.smartPreview", &json!({})).unwrap(), json!({"smartPreview": true, "originalOnline": true}));
+    let online = s.render_now(id, 48, 32).unwrap().image;
+    // the drive goes away
+    std::fs::rename(&src, src.with_extension("offline")).unwrap();
+    s.media.forget(id);
+    assert_eq!(s.execute("photo.smartPreview", &json!({})).unwrap()["originalOnline"], false);
+    let offline = s.render_now(id, 48, 32).expect("renders from the smart preview").image;
+    let diff: f64 = online.data.iter().zip(&offline.data).map(|(a, b)| (a[0] as f64 - b[0] as f64).abs()).sum::<f64>() / online.data.len() as f64;
+    assert!(diff < 6.0, "the proxy looks like the original: {diff}");
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 1.0})).unwrap();
+    s.media.forget(id);
+    assert_ne!(s.render_now(id, 48, 32).unwrap().image.data, offline.data, "edits apply offline");
+    // without the proxy it can't be opened
+    s.execute("library.smartPreviews", &json!({"discard": true})).unwrap();
+    s.media.forget(id);
+    assert!(s.render_now(id, 48, 32).is_err());
+    let _ = std::fs::remove_dir_all(src.with_extension("offline"));
+    let _ = std::fs::remove_dir_all(&lib);
+}

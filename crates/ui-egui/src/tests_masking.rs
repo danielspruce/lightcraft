@@ -51,14 +51,16 @@ fn mask_overlay_keys_and_pins() {
     let d = develop(&h);
     let o = crate::panels::detail::view_overlay(&h.app, &d);
     assert_eq!(o, Overlay::Mask { id: 2, view: MaskView::Color, color: [230, 30, 40], opacity: 50 });
-    // O toggles it, Shift+O cycles the mode (and leaves the crop overlay alone)
+    // O toggles it, Shift+O cycles the colour (and leaves the crop overlay alone)
     h.request("ui.key", json!({"key": "o"}), T);
     assert!(!h.app.ui.mask_overlay);
     assert_eq!(crate::panels::detail::view_overlay(&h.app, &d), Overlay::None);
     h.request("ui.key", json!({"key": "o"}), T);
     let crop = h.app.ui.crop_overlay;
+    let colour = h.app.ui.mask_overlay_color;
     h.request("ui.key", json!({"key": "o", "shift": true}), T);
-    assert_eq!(h.app.ui.mask_overlay_mode, "colorOnBw");
+    assert_ne!(h.app.ui.mask_overlay_color, colour, "the next overlay colour");
+    assert_eq!(h.app.ui.mask_overlay_mode, "color", "the mode stays");
     assert_eq!(h.app.ui.crop_overlay, crop);
     exec(&mut h, "view.maskOverlayMode", json!({"mode": "whiteOnBlack"}));
     exec(&mut h, "view.maskOverlayColor", json!({"color": "#2870f0", "opacity": 80}));
@@ -214,4 +216,289 @@ fn mask_list_rename_hide_and_overlay_colour() {
     let all = crate::panels::masking::OVERLAY_COLORS;
     let i = all.iter().position(|c| *c == before).unwrap();
     assert_eq!(h.app.ui.mask_overlay_color, all[(i + 1) % all.len()]);
+}
+
+#[test]
+fn command_drag_straightens_in_crop() {
+    let mut h = detail("panel.crop");
+    let tool = h.app.ui.tool.clone();
+    let before = develop(&h).crop.geometry.angle;
+    let r = h.request(
+        "ui.pointer",
+        json!({"events": [{"kind": "down", "x": 0.3, "y": 0.5}, {"kind": "drag", "x": 0.45, "y": 0.51}, {"kind": "drag", "x": 0.6, "y": 0.53}, {"kind": "up", "x": 0.6, "y": 0.53}], "cmd": true}),
+        T,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let angle = develop(&h).crop.geometry.angle;
+    assert!(angle != before && (1.0..15.0).contains(&angle.abs()), "a slightly tilted line straightens: {angle}");
+    assert_eq!(h.app.ui.tool, tool, "the crop tool stays active");
+    assert!(h.app.gesture.is_none());
+    h.settle(SETTLE);
+}
+
+#[test]
+fn option_digit_toggles_keyword_from_set() {
+    let mut h = detail("panel.keywords");
+    exec(&mut h, "photo.setMeta", json!({"addKeywords": ["alpha"]}));
+    exec(&mut h, "photo.setMeta", json!({"removeKeywords": ["alpha"]}));
+    let has = |h: &Headless| develop_photo_keywords(h).iter().any(|k| k == "alpha");
+    assert!(!has(&h));
+    let r = h.request("ui.key", json!({"key": "1", "alt": true}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(has(&h), "⌥1 adds the first recent keyword");
+    let r = h.request("ui.clickWidget", json!({"id": "kwSet:1"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(!has(&h), "its button removes it again");
+    h.settle(SETTLE);
+}
+
+fn develop_photo_keywords(h: &Headless) -> Vec<String> {
+    let id = h.app.session.active().expect("active photo");
+    h.app.session.catalog.photo(id).unwrap().meta.keywords.clone()
+}
+
+#[test]
+fn smart_album_rule_editor_creates_and_edits() {
+    let mut h = detail("panel.edit");
+    exec(&mut h, "dialog.smartAlbum", json!({"name": "Keepers"}));
+    // the editor starts with Rating ≥ 3; "+" adds a second rule
+    let r = h.request("ui.clickWidget", json!({"id": "button:ruleAdd-rules-0"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let Some(crate::state::Dialog::SmartRules { rules, .. }) = &mut h.app.ui.dialog else { panic!("no rule editor") };
+    assert_eq!(rules.rules.len(), 2);
+    rules.rules[1] = serde_json::from_value(json!({"field": "flag", "op": "isNot", "value": "reject"})).unwrap();
+    let r = h.request("ui.dialog.confirm", json!({}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let a = h.app.session.catalog.albums().find(|a| a.name == "Keepers").expect("album").clone();
+    let n = h.app.session.catalog.photos().filter(|p| !p.deleted && p.rating >= 3 && p.flag != lightcraft_catalog::Flag::Reject).count();
+    assert_eq!(h.app.session.catalog.album_count(a.id), n);
+    // edit: back to one rule
+    exec(&mut h, "dialog.smartAlbum", json!({"id": a.id.0}));
+    let r = h.request("ui.clickWidget", json!({"id": "button:ruleRemove-rules-1"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = h.request("ui.dialog.confirm", json!({}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let n3 = h.app.session.catalog.photos().filter(|p| !p.deleted && p.rating >= 3).count();
+    assert_eq!(h.app.session.catalog.album_count(a.id), n3);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn g_toggles_grids_and_shift_g_starts_guided_upright() {
+    let mut h = detail("panel.edit");
+    let key = |h: &mut Headless, shift: bool| {
+        let r = h.request("ui.key", json!({"key": "g", "shift": shift}), T);
+        assert_eq!(r["ok"], true, "{r}");
+    };
+    key(&mut h, false);
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::PhotoGrid);
+    key(&mut h, false);
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::SquareGrid);
+    key(&mut h, false);
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::PhotoGrid);
+    key(&mut h, true);
+    assert_eq!((h.app.ui.view, h.app.ui.right, h.app.ui.tool.as_str()), (crate::state::ViewMode::Detail, RightPanel::Crop, "guidedUpright"));
+    assert_eq!(develop(&h).geometry.upright, lightcraft_develop::Upright::Guided);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn luminance_range_controls_and_map() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "luminanceRange", "lo": 0.6, "hi": 1.0}));
+    h.settle(SETTLE);
+    let lum = |h: &Headless| match &develop(h).masks[0].components[0].shape {
+        MaskShape::LuminanceRange { lo, hi, lo_feather, .. } => (*lo, *hi, *lo_feather),
+        s => panic!("{s:?}"),
+    };
+    let undo0 = h.app.session.undo.len();
+    // drag the high handle from the right end to 80 %
+    let r = h.request("ui.dragWidget", json!({"id": "lumRange:0", "fx": 1.0, "fy": 0.5, "dx": -48.0}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let (lo, hi, _) = lum(&h);
+    assert_eq!(lo, 0.6, "the nearer handle moves");
+    assert!(hi < 0.9 && hi > 0.6, "{hi}");
+    assert_eq!(h.app.session.undo.len(), undo0 + 1, "one undo step per drag");
+    // Show Luminance Map: black-and-white overlay, and back
+    let r = h.request("ui.clickWidget", json!({"id": "check:lumMap0"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(h.app.ui.mask_overlay && h.app.ui.mask_overlay_mode == "colorOnBw");
+    let r = h.request("ui.clickWidget", json!({"id": "check:lumMap0"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_ne!(h.app.ui.mask_overlay_mode, "colorOnBw");
+    h.settle(SETTLE);
+}
+
+#[test]
+fn b_adds_to_quick_collection_in_the_grid_and_brushes_in_edit() {
+    let mut h = detail("panel.edit");
+    // in the loupe B is the masking brush
+    let r = h.request("ui.key", json!({"key": "b"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(h.app.ui.tool, "brush");
+    assert!(h.app.session.catalog.quick_collection().is_none());
+    // in the grid it adds the selection to the Quick Collection
+    exec(&mut h, "view.photoGrid", json!({}));
+    let r = h.request("ui.key", json!({"key": "b"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let q = h.app.session.catalog.quick_collection().expect("quick collection");
+    assert_eq!(h.app.session.catalog.album_count(q), 1);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn local_folder_tree_expands_and_browses() {
+    let base = std::env::temp_dir().join(format!("lc-ui-tree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("Trip/Day 1")).unwrap();
+    std::fs::create_dir_all(base.join(".hidden")).unwrap();
+    let mut h = detail("panel.edit");
+    exec(&mut h, "view.leftPanel", json!({"show": true}));
+    exec(&mut h, "library.browse", json!({"path": base.to_string_lossy()}));
+    h.settle(SETTLE);
+    let base_s = base.to_string_lossy().to_string();
+    let r = h.request("ui.clickWidget", json!({"id": format!("folderToggle:{base_s}")}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    for _ in 0..3 {
+        h.step();
+    }
+    let trip = base.join("Trip").to_string_lossy().to_string();
+    let r = h.request("ui.clickWidget", json!({"id": format!("source:local:{trip}")}), T);
+    assert_eq!(r["ok"], true, "the subfolder is listed: {r}");
+    assert_eq!(h.app.session.browse.as_ref().map(|b| b.path.clone()), Some(trip.clone()), "clicking it browses it");
+    let hidden = base.join(".hidden").to_string_lossy().to_string();
+    let r = h.request("ui.clickWidget", json!({"id": format!("source:local:{hidden}")}), T);
+    assert_ne!(r["ok"], true, "hidden folders are not listed");
+    let _ = std::fs::remove_dir_all(&base);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn slideshow_advances_pauses_and_ends() {
+    let mut h = detail("panel.edit");
+    let first = h.app.session.active();
+    exec(&mut h, "view.slideshow", json!({"interval": 0.5}));
+    assert!(h.app.ui.fullscreen && h.app.ui.slideshow.is_some());
+    // simulated time runs with the frames
+    let mut moved = false;
+    for _ in 0..200 {
+        h.step();
+        if h.app.session.active() != first {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "the next photo comes up");
+    // Space pauses: nothing moves
+    let r = h.request("ui.key", json!({"key": "space"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(h.app.ui.slideshow.is_some_and(|s| s.2), "paused");
+    let held = h.app.session.active();
+    for _ in 0..120 {
+        h.step();
+    }
+    assert_eq!(h.app.session.active(), held);
+    // Esc ends it
+    let r = h.request("ui.key", json!({"key": "escape"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(!h.app.ui.fullscreen && h.app.ui.slideshow.is_none());
+    h.settle(SETTLE);
+}
+
+#[test]
+fn geometry_slider_drag_marks_the_grid() {
+    let mut h = detail("panel.crop");
+    let spec = lightcraft_develop::controls::find("geometry.vertical").unwrap();
+    let start = crate::widgets::SliderOut { value: None, drag_started: true, drag_stopped: false, reset: false };
+    crate::panels::edit::apply_slider_out(&mut h.app, spec, start, |_, _| Ok(serde_json::Value::Null));
+    assert_eq!(h.app.ui.dragging_control.as_deref(), Some("geometry.vertical"));
+    h.step();
+    let stop = crate::widgets::SliderOut { value: None, drag_started: false, drag_stopped: true, reset: false };
+    crate::panels::edit::apply_slider_out(&mut h.app, spec, stop, |_, _| Ok(serde_json::Value::Null));
+    assert!(h.app.ui.dragging_control.is_none());
+    h.settle(SETTLE);
+}
+
+#[test]
+fn edit_in_external_editor_opens_the_copy() {
+    let dir = std::env::temp_dir().join(format!("lc-ui-ext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opened: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+    let o = opened.clone();
+    let services = Services {
+        png: None,
+        open_with: Some(Box::new(move |path: &str, app: &str| {
+            o.lock().unwrap().push((path.to_string(), app.to_string()));
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let app = LightcraftApp::new(lightcraft_engine::Session::with_demo().with_fs(), services);
+    let mut h = Headless::new(app, [1200.0, 800.0], 1.0);
+    h.app.ui.settings.external_editor = "PhotoCraft".into();
+    let r = h.request("engine.execute", json!({"command": "photo.editInExternal", "params": {"dir": dir.to_string_lossy()}}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let calls = opened.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.ends_with("-Edit.tif") && std::path::Path::new(&calls[0].0).exists(), "{calls:?}");
+    assert_eq!(calls[0].1, "PhotoCraft");
+    let _ = std::fs::remove_dir_all(&dir);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn second_window_shows_the_active_photo() {
+    let mut h = detail("panel.edit");
+    exec(&mut h, "view.photoGrid", json!({}));
+    exec(&mut h, "view.secondWindow", json!({"show": true}));
+    h.settle(SETTLE);
+    // headless has no native windows: it's embedded, and renders the photo for its own slot
+    let tex = h.app.renderer.textures.get(&crate::render::Slot::Second).map(|t| t.photo);
+    assert_eq!(tex, h.app.session.active(), "the second window has its own render of the active photo");
+    let r = h.request("ui.clickWidget", json!({"id": "view:secondWindow"}), T);
+    assert_eq!(r["ok"], true, "on screen: {r}");
+    exec(&mut h, "view.secondWindow", json!({}));
+    assert!(!h.app.ui.second_window);
+    h.settle(SETTLE);
+}
+
+/// Frame time of the photo grid on a 100k-photo library (ignored:
+/// `cargo test --release -p lightcraft-ui-egui -- --ignored grid_frame_100k --nocapture`).
+#[test]
+#[ignore]
+fn grid_frame_100k() {
+    use lightcraft_catalog::{Op, Photo, PhotoId, Source};
+    let mut session = lightcraft_engine::Session::new();
+    let ops = (0..100_000u64)
+        .map(|i| {
+            let mut p = Photo::new(
+                PhotoId(i + 1),
+                Source::Demo { scene: (i % 20) as u32 },
+                &format!("IMG_{i:06}.jpg"),
+                "JPEG",
+                6000,
+                4000 - (i % 3) as u32 * 1000,
+                "2026-01-01T00:00:00",
+            );
+            p.captured = Some(format!("20{:02}-{:02}-{:02}T10:00:00", 10 + i % 16, 1 + i % 12, 1 + i % 28));
+            p.meta.keywords = vec![format!("kw{}", i % 300)];
+            Op::AddPhoto { photo: Box::new(p) }
+        })
+        .collect();
+    session.commit("Add", Op::Batch { ops }).unwrap();
+    let app = LightcraftApp::new(session, Services { png: None, ..Default::default() });
+    let mut h = Headless::new(app, [1600.0, 1000.0], 1.0);
+    h.app.ui.view = crate::state::ViewMode::PhotoGrid;
+    h.app.ui.left_panel = true;
+    for _ in 0..5 {
+        h.step();
+    }
+    let t = std::time::Instant::now();
+    let n = 30;
+    for _ in 0..n {
+        h.step();
+    }
+    let ms = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+    eprintln!("grid frame at 100k photos: {ms:.1} ms (UI thread, renders excluded)");
 }

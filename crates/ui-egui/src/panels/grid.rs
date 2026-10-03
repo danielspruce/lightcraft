@@ -59,20 +59,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let square = app.ui.view == ViewMode::SquareGrid;
     let target = app.ui.thumb_size;
     let avail_w = ui.available_width() - 8.0;
-    let aspects: Vec<f32> = if square {
-        vec![1.0; ids.len()]
-    } else {
-        ids.iter()
-            .map(|id| {
-                let p = app.session.catalog.photo(*id);
-                let (w, h) = p.map(|p| (p.width.max(1) as f32, p.height.max(1) as f32)).unwrap_or((3.0, 2.0));
-                let swap = p.is_some_and(|p| p.develop.orientation.swaps_axes());
-                let crop = p.map(|p| p.develop.crop.geometry.rect).unwrap_or(lightcraft_geom::Rect::UNIT);
-                let (w, h) = if swap { (h, w) } else { (w, h) };
-                (w * crop.width() as f32) / (h * crop.height() as f32).max(1e-3)
-            })
-            .collect()
-    };
     let by = resolve_group(app.session.sort.group, target);
     let runs = if app.session.source == lightcraft_engine::LibrarySource::RecentlyDeleted {
         Vec::new()
@@ -82,10 +68,33 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         } else {
             app.session.sort.key
         };
-        app.session.catalog.date_runs(&ids, key, by)
+        (*app.caches.date_runs(&app.session.catalog, &ids, key, by)).clone()
     };
     let spans: Vec<(usize, usize)> = runs.iter().map(|r| (r.start, r.count)).collect();
-    let lay = layout(&aspects, &spans, avail_w, target, square);
+    // the layout only changes with the photos, their shapes, the width and the thumbnail size
+    let lay_key = crate::key_of((app.session.catalog.revision, &ids, avail_w.to_bits(), target.to_bits(), square, &spans));
+    let lay = match &app.caches.grid_layout {
+        Some((k, l)) if *k == lay_key => l.clone(),
+        _ => {
+            let aspects: Vec<f32> = if square {
+                vec![1.0; ids.len()]
+            } else {
+                ids.iter()
+                    .map(|id| {
+                        let p = app.session.catalog.photo(*id);
+                        let (w, h) = p.map(|p| (p.width.max(1) as f32, p.height.max(1) as f32)).unwrap_or((3.0, 2.0));
+                        let swap = p.is_some_and(|p| p.develop.orientation.swaps_axes());
+                        let crop = p.map(|p| p.develop.crop.geometry.rect).unwrap_or(lightcraft_geom::Rect::UNIT);
+                        let (w, h) = if swap { (h, w) } else { (w, h) };
+                        (w * crop.width() as f32) / (h * crop.height() as f32).max(1e-3)
+                    })
+                    .collect()
+            };
+            let l = std::sync::Arc::new(layout(&aspects, &spans, avail_w, target, square));
+            app.caches.grid_layout = Some((lay_key, l.clone()));
+            l
+        }
+    };
     struct Cell {
         id: PhotoId,
         rect: Rect,
@@ -291,6 +300,20 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
     let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::click_and_drag());
     register(ui.ctx(), format!("thumb:{}", id.0), r);
     let selected = app.session.selection.contains(id);
+    // screen readers: the file, then rating / flag / label
+    let mut spoken = photo.file_name.clone();
+    if photo.rating > 0 {
+        spoken.push_str(&format!(", {} star{}", photo.rating, if photo.rating == 1 { "" } else { "s" }));
+    }
+    match photo.flag {
+        lightcraft_catalog::Flag::Pick => spoken.push_str(", picked"),
+        lightcraft_catalog::Flag::Reject => spoken.push_str(", rejected"),
+        lightcraft_catalog::Flag::None => {}
+    }
+    if let Some(l) = photo.label {
+        spoken.push_str(&format!(", {} label", app.session.catalog.label_name(l)));
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &spoken));
     let active = app.session.selection.active == Some(id);
     let p = ui.painter();
     let img_rect = if square {

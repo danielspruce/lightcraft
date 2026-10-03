@@ -463,11 +463,54 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         ] {
             meta_field(app, ui, label, key, value, 1);
         }
-        small(ui, "GPS");
-        let gps = m.gps.map(|(la, lo)| {
-            format!("{:.5}° {}, {:.5}° {}", la.abs(), if la >= 0.0 { "N" } else { "S" }, lo.abs(), if lo >= 0.0 { "E" } else { "W" })
-        });
-        ui.label(egui::RichText::new(gps.unwrap_or_else(|| "—".into())).color(t.text_label));
+        // GPS: typed as "lat, lon" (or degrees / minutes / seconds); empty clears it
+        let gps = m.gps.map(|(la, lo)| format!("{la:.6}, {lo:.6}")).unwrap_or_default();
+        let gid = egui::Id::new("info-gps");
+        ui.label(egui::RichText::new("GPS").size(11.5).color(t.text_dim));
+        let mut text: String = ui.data(|d| d.get_temp(gid)).unwrap_or_else(|| gps.clone());
+        let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("latitude, longitude").desired_width(f32::INFINITY));
+        register(ui.ctx(), "field:gps", r.rect);
+        if r.has_focus() {
+            ui.data_mut(|d| d.insert_temp(gid, text.clone()));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(gid));
+        }
+        if r.lost_focus()
+            && text.trim() != gps
+            && let Err(e) = app.run("photo.setMeta", json!({"gps": text.trim()}))
+        {
+            app.toast(ui.ctx(), e);
+        }
+        if let Some((la, lo)) = m.gps {
+            let pretty = format!("{:.5}° {}, {:.5}° {}", la.abs(), if la >= 0.0 { "N" } else { "S" }, lo.abs(), if lo >= 0.0 { "E" } else { "W" });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(pretty).size(11.0).color(t.text_dim));
+                if text_button(ui, "showOnMap", "Show on Map", false).on_hover_text("Open the place in OpenStreetMap").clicked() {
+                    let url = format!("https://www.openstreetmap.org/?mlat={la:.6}&mlon={lo:.6}#map=15/{la:.6}/{lo:.6}");
+                    if let Err(e) = crate::links::open(app, &url) {
+                        app.toast(ui.ctx(), e);
+                    }
+                }
+            });
+        }
+        // offline originals / smart previews
+        if let lightcraft_catalog::Source::File { path } = &p.source {
+            let online = std::path::Path::new(path).exists();
+            let smart = lightcraft_engine::cmd::previews::has_smart_preview(&app.session, p.id);
+            if !online || smart {
+                let text = match (online, smart) {
+                    (false, true) => "Original offline · editing the smart preview",
+                    (false, false) => "Original offline · no smart preview",
+                    _ => "Smart preview available",
+                };
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(text).color(if online { t.text_dim } else { t.accent }));
+            }
+        }
+        ui.add_space(10.0);
+        if text_button(ui, "allMetadata", "All Metadata…", false).on_hover_text("Every EXIF, GPS and XMP field in the file").clicked() {
+            let _ = app.run("dialog.allMetadata", json!({}));
+        }
     });
 }
 
@@ -583,11 +626,13 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
         });
         ui.add_space(10.0);
+        keyword_set(app, ui, &p.meta.keywords);
+        ui.add_space(10.0);
         // suggestions: completions of the typed text, else keywords used together with this
         // photo's keywords, else the most used ones
         let typed = ui.data(|d| d.get_temp::<String>(kid).unwrap_or_default());
         let last = typed.rsplit(',').next().unwrap_or("").trim().to_string();
-        let suggestions = app.session.catalog.keyword_suggestions(&p.meta.keywords, &last, 12);
+        let suggestions = (*app.caches.suggestions(&app.session.catalog, &p.meta.keywords, &last, 12)).clone();
         if !suggestions.is_empty() {
             ui.label(egui::RichText::new("Suggestions").color(t.text_dim));
             ui.horizontal_wrapped(|ui| {
@@ -603,6 +648,64 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     }
                 }
             });
+        }
+    });
+}
+
+/// The keyword set: pick a set, then nine buttons (⌥1–⌥9) that toggle its keywords on the
+/// selected photos; "Save as Set…" keeps the current nine under a name.
+fn keyword_set(app: &mut LightcraftApp, ui: &mut egui::Ui, have: &[String]) {
+    let t = Tokens::get(ui.ctx());
+    let sets = lightcraft_engine::cmd::keywords::keyword_sets_json(&app.session);
+    let current = sets["current"].as_str().unwrap_or_default().to_string();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Keyword Set").color(t.text_dim));
+        egui::ComboBox::from_id_salt("kw-set").selected_text(&current).show_ui(ui, |ui| {
+            for set in sets["sets"].as_array().into_iter().flatten() {
+                let name = set["name"].as_str().unwrap_or_default();
+                if ui.selectable_label(name == current, name).clicked() {
+                    let _ = app.run("keyword.useSet", json!({"name": name}));
+                }
+            }
+            ui.separator();
+            if ui.button("Save Current Keywords as Set…").clicked() {
+                app.ui.dialog = Some(crate::state::Dialog::TextPrompt {
+                    title: "Save Keyword Set".into(),
+                    hint: "Set name".into(),
+                    value: String::new(),
+                    command: "keyword.saveSet".into(),
+                    params: json!({}),
+                    key: "name".into(),
+                });
+            }
+            if current != lightcraft_engine::cmd::keywords::RECENT && ui.button(format!("Delete “{current}”")).clicked() {
+                let _ = app.run("keyword.deleteSet", json!({"name": current}));
+            }
+        });
+    });
+    let kws: Vec<String> = sets["keywords"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    if kws.is_empty() {
+        ui.label(egui::RichText::new("Keywords you add appear here; ⌥1–⌥9 apply them.").color(t.text_dim));
+        return;
+    }
+    let bw = ((ui.available_width() - 8.0) / 3.0).floor().max(40.0);
+    egui::Grid::new("kw-set-grid").num_columns(3).spacing([4.0, 4.0]).show(ui, |ui| {
+        for (i, k) in kws.iter().enumerate() {
+            let on = have.iter().any(|x| x.eq_ignore_ascii_case(k));
+            let short = k.rsplit('|').next().unwrap_or(k);
+            let r = ui
+                .add_sized(
+                    [bw, 22.0],
+                    egui::Button::new(egui::RichText::new(short).size(11.5).color(if on { t.text } else { t.text_label })).selected(on).truncate(),
+                )
+                .on_hover_text(format!("{} — ⌥{}", k.replace('|', " › "), i + 1));
+            register(ui.ctx(), format!("kwSet:{}", i + 1), r.rect);
+            if r.clicked() {
+                let _ = app.run("keyword.toggleFromSet", json!({"index": i + 1}));
+            }
+            if i % 3 == 2 {
+                ui.end_row();
+            }
         }
     });
 }

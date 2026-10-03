@@ -12,6 +12,7 @@ pub mod journal;
 pub mod keywords;
 pub mod model;
 pub mod query;
+pub mod rules;
 pub mod stacks;
 pub mod store;
 
@@ -24,6 +25,7 @@ pub use keywords::KeywordNode;
 use lightcraft_develop::DevelopSettings;
 pub use model::*;
 pub use query::{DateGroup, Filter, RatingOp, Sort, SortKey};
+pub use rules::{Match, Rule, RuleSet};
 use serde::{Deserialize, Serialize};
 pub use store::{FsStore, MemStore, Store};
 
@@ -160,6 +162,18 @@ pub enum Op {
         id: PhotoId,
         file_name: String,
         source: Source,
+        /// The file's format when it changes too (Convert to DNG).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// What a photo's file is now (after it changed on disk: Reload).
+    SetContent {
+        id: PhotoId,
+        width: u32,
+        height: u32,
+        file_size: u64,
+        #[serde(default)]
+        content_hash: Option<String>,
     },
     /// The name shown for a colour label (`None` = its colour's name).
     SetLabelName {
@@ -233,6 +247,11 @@ impl Catalog {
     pub fn albums(&self) -> impl Iterator<Item = &Album> {
         self.albums.values()
     }
+    /// The Quick Collection, once something was added to it.
+    pub fn quick_collection(&self) -> Option<AlbumId> {
+        self.albums.values().find(|a| a.quick).map(|a| a.id)
+    }
+
     /// Albums (regular and smart) that contain the photo.
     pub fn albums_of(&self, id: PhotoId) -> Vec<AlbumId> {
         let Some(p) = self.photos.get(&id) else { return Vec::new() };
@@ -287,6 +306,11 @@ impl Catalog {
     /// The custom name of a colour label, if any.
     pub fn custom_label_name(&self, l: ColorLabel) -> Option<&str> {
         self.label_names.get(&l).map(String::as_str)
+    }
+    /// The label a name stands for: a custom name first, then a colour's own name (any case).
+    pub fn label_from_name(&self, name: &str) -> Option<ColorLabel> {
+        let name = name.trim();
+        self.label_names.iter().find(|(_, n)| n.trim().eq_ignore_ascii_case(name)).map(|(l, _)| *l).or_else(|| ColorLabel::parse(name))
     }
 
     // ---- writes
@@ -475,10 +499,21 @@ impl Catalog {
                 let p = self.photo_mut(id)?;
                 Op::SetCaptured { id, captured: std::mem::replace(&mut p.captured, captured) }
             }
-            Op::Relink { id, file_name, source } => {
+            Op::Relink { id, file_name, source, format } => {
                 let p = self.photo_mut(id)?;
                 let old_name = std::mem::replace(&mut p.file_name, file_name);
-                Op::Relink { id, file_name: old_name, source: std::mem::replace(&mut p.source, source) }
+                let old_format = format.map(|f| std::mem::replace(&mut p.format, f));
+                Op::Relink { id, file_name: old_name, source: std::mem::replace(&mut p.source, source), format: old_format }
+            }
+            Op::SetContent { id, width, height, file_size, content_hash } => {
+                let p = self.photo_mut(id)?;
+                Op::SetContent {
+                    id,
+                    width: std::mem::replace(&mut p.width, width),
+                    height: std::mem::replace(&mut p.height, height),
+                    file_size: std::mem::replace(&mut p.file_size, file_size),
+                    content_hash: std::mem::replace(&mut p.content_hash, content_hash),
+                }
             }
             Op::SetFile { id, file_name, source } => {
                 if file_name.trim().is_empty() {

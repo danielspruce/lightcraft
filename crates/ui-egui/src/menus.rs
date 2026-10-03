@@ -11,8 +11,11 @@ use crate::state::{BeforeAfter, Dialog, RightPanel, ViewMode, Zoom};
 pub type UiCommand = (&'static str, &'static str, Option<&'static str>, &'static str);
 
 pub const UI_COMMANDS: &[UiCommand] = &[
-    ("view.photoGrid", "Photo Grid", Some("G"), "View"),
-    ("view.squareGrid", "Square Grid", Some("Shift+G"), "View"),
+    ("view.photoGrid", "Photo Grid", None, "View"),
+    ("view.squareGrid", "Square Grid", None, "View"),
+    // G: Photo Grid ↔ Square Grid (from other views: the photo grid)
+    ("view.gridToggle", "Grid", Some("G"), ""),
+    ("tool.guidedUpright", "Guided Upright", Some("Shift+G"), "Window>Tools"),
     ("view.detail", "Detail", Some("D"), "View"),
     ("view.compare", "Compare", Some("Shift+C"), "View"),
     ("view.survey", "Survey", Some("N"), "View"),
@@ -27,7 +30,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.beforeAfterSplitTopBottom", "Before/After Split Top/Bottom", Some("Alt+Shift+Y"), "View"),
     ("view.showOriginal", "Show Original", Some("\\"), "View"),
     ("view.zoomFit", "Zoom to Fit", Some("Cmd+0"), "View"),
-    ("view.zoom100", "Zoom 100%", Some("Cmd+1"), "View"),
+    ("view.zoom100", "Zoom 100%", Some("Cmd+Alt+0"), "View"),
     ("view.zoomToggle", "Toggle Zoom", Some("Z"), "View"),
     ("view.zoomIn", "Zoom In", Some("Cmd+="), "View"),
     ("view.zoomOut", "Zoom Out", Some("Cmd+-"), "View"),
@@ -60,11 +63,11 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("panel.versions", "Versions", Some("Shift+V"), "Window"),
     ("panel.activity", "History", None, "Window"),
     ("panel.close", "Close Panel", None, ""),
-    ("section.light", "Light", Some("Cmd+Alt+1"), "Window>Edit Sections"),
-    ("section.color", "Color", Some("Cmd+Alt+2"), "Window>Edit Sections"),
-    ("section.effects", "Effects", Some("Cmd+Alt+3"), "Window>Edit Sections"),
-    ("section.detail", "Detail", Some("Cmd+Alt+4"), "Window>Edit Sections"),
-    ("section.optics", "Optics", Some("Cmd+Alt+5"), "Window>Edit Sections"),
+    ("section.light", "Light", Some("Cmd+1"), "Window>Edit Sections"),
+    ("section.color", "Color", Some("Cmd+2"), "Window>Edit Sections"),
+    ("section.effects", "Effects", Some("Cmd+3"), "Window>Edit Sections"),
+    ("section.detail", "Detail", Some("Cmd+4"), "Window>Edit Sections"),
+    ("section.optics", "Optics", Some("Cmd+5"), "Window>Edit Sections"),
     ("tool.brush", "Brush", Some("B"), "Window>Tools"),
     ("tool.linear", "Linear Gradient", Some("L"), "Window>Tools"),
     ("tool.radial", "Radial Gradient", Some("R"), "Window>Tools"),
@@ -77,13 +80,19 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("brush.featherMore", "Increase Brush Feather", Some("Shift+]"), "Window>Tools"),
     ("dialog.newAlbum", "New Album…", Some("Cmd+N"), "File"),
     ("dialog.newFolder", "New Folder…", Some("Cmd+Shift+N"), "File"),
+    ("dialog.smartAlbum", "New Smart Album…", None, "File"),
+    ("view.photoCounts", "Show Photo Counts", None, "View"),
+    ("view.slideshow", "Slideshow", Some("Cmd+Alt+Enter"), "View"),
+    ("view.secondWindow", "Second Window", Some("Cmd+F11"), "Window"),
+    ("dialog.allMetadata", "All Metadata…", None, "Photo"),
     ("dialog.newSmartAlbum", "New Smart Album from Filter…", Some("Cmd+Alt+N"), "File"),
     ("dialog.createPreset", "Create Preset…", Some("Cmd+Shift+P"), "Photo"),
     ("dialog.autoStack", "Auto-Stack by Capture Time…", None, "Photo>Stack"),
     ("dialog.copySettings", "Choose Edit Settings to Copy…", Some("Cmd+Shift+C"), "Edit"),
     ("dialog.pasteSettings", "Paste Selected Settings…", Some("Cmd+Shift+V"), "Edit"),
     ("view.focusSearch", "Find…", Some("Cmd+F"), "Edit"),
-    ("dialog.export", "Export…", Some("Cmd+Shift+E"), "File"),
+    ("dialog.export", "Export…", None, "File"),
+    ("photo.editInExternal", "Edit in External Editor", Some("Cmd+Shift+E"), "Photo"),
     ("dialog.mergeHdr", "HDR…", Some("Ctrl+H"), "Photo>Photo Merge"),
     ("dialog.mergePanorama", "Panorama…", Some("Ctrl+M"), "Photo>Photo Merge"),
     ("dialog.mergeHdrPanorama", "HDR Panorama…", None, "Photo>Photo Merge"),
@@ -102,15 +111,18 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("app.settings", "Settings…", Some("Cmd+,"), "Edit"),
     ("app.openLibrary", "Open Library…", None, "File"),
     ("app.about", "About LightCraft", None, "Help"),
+    ("app.systemInfo", "System Info…", None, "Help"),
+    ("app.whatsNew", "What's New", None, "Help"),
     ("app.help", "LightCraft Help", Some("F1"), "Help"),
     ("app.discord", "Join the ArtCraft Discord…", None, "Help"),
+    ("app.feedback", "Send Feedback…", None, "Help"),
     ("app.website", "LightCraft Website", None, "Help"),
     ("app.github", "LightCraft on GitHub", None, "Help"),
     ("app.artcraft", "ArtCraft Website", None, "Help"),
     ("app.shortcuts", "Keyboard Shortcuts", Some("Cmd+/"), "Help"),
     ("app.export", "Export Now", None, ""),
     ("app.showInFinder", "Show in Finder", Some("Cmd+R"), "Photo"),
-    ("dialog.rename", "Rename Photos…", None, "Photo"),
+    ("dialog.rename", "Rename Photos…", Some("F2"), "Photo"),
     ("dialog.labelNames", "Edit Color Label Names…", None, ""),
     ("dialog.captureTime", "Edit Capture Time…", None, "Photo"),
     ("app.exportPrevious", "Export with Previous", Some("Cmd+Alt+Shift+E"), "File"),
@@ -184,6 +196,18 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.view = ViewMode::SquareGrid;
             Ok(Value::Null)
         }
+        "view.secondWindow" => {
+            app.ui.second_window = p.get("show").and_then(Value::as_bool).unwrap_or(!app.ui.second_window);
+            Ok(json!({"show": app.ui.second_window}))
+        }
+        "view.photoCounts" => {
+            app.ui.show_counts = p.get("show").and_then(Value::as_bool).unwrap_or(!app.ui.show_counts);
+            Ok(json!({"show": app.ui.show_counts}))
+        }
+        "view.gridToggle" => {
+            app.ui.view = if app.ui.view == ViewMode::PhotoGrid { ViewMode::SquareGrid } else { ViewMode::PhotoGrid };
+            Ok(Value::Null)
+        }
         "view.detail" => {
             app.ui.view = ViewMode::Detail;
             Ok(Value::Null)
@@ -205,6 +229,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 app.ui.dialog = None;
             } else if app.ui.fullscreen {
                 app.ui.fullscreen = false;
+                app.ui.slideshow = None;
             } else if !app.ui.tool.is_empty() {
                 app.ui.tool.clear();
             } else if matches!(app.ui.view, ViewMode::Compare | ViewMode::Survey) {
@@ -214,8 +239,32 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             }
             Ok(Value::Null)
         }
+        "view.slideshow" => {
+            // {interval?: seconds (4)}: the photos in view, full screen, one after another
+            let interval = p.get("interval").and_then(Value::as_f64).unwrap_or(4.0).clamp(0.5, 120.0);
+            if app.session.active().is_none() {
+                let first = app.session.visible_cloned().first().copied();
+                match first {
+                    Some(f) => {
+                        let _ = app.run("library.select", json!({"ids": [f.0]}));
+                    }
+                    None => return Some(Err("no photos to show".into())),
+                }
+            }
+            let now = ctx.input(|i| i.time);
+            app.ui.slideshow = Some((interval, now + interval, false));
+            app.ui.fullscreen = true;
+            app.ui.zoom = Zoom::Fit;
+            app.ui.tool.clear();
+            let _ = app.session.end_interaction();
+            app.toast(&ctx, "Slideshow · Space pauses · Esc ends");
+            Ok(json!({"interval": interval}))
+        }
         "view.fullScreenPreview" => {
             app.ui.fullscreen = !app.ui.fullscreen;
+            if !app.ui.fullscreen {
+                app.ui.slideshow = None;
+            }
             if app.ui.fullscreen {
                 app.ui.zoom = Zoom::Fit;
                 app.ui.tool.clear();
@@ -489,6 +538,20 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let tool = &s["tool.".len()..];
             match tool {
                 "none" => app.ui.tool.clear(),
+                "guidedUpright" => {
+                    // Crop & Geometry with Guided Upright on, ready to draw guides
+                    app.ui.right = RightPanel::Crop;
+                    app.ui.view = ViewMode::Detail;
+                    let guided = app
+                        .session
+                        .active()
+                        .and_then(|id| app.session.develop_of(id))
+                        .is_some_and(|d| d.geometry.upright == lightcraft_develop::Upright::Guided);
+                    if !guided && let Err(e) = app.run("geometry.upright", json!({"mode": "guided"})) {
+                        return Some(Err(e));
+                    }
+                    app.ui.tool = "guidedUpright".into();
+                }
                 "brush" => {
                     app.ui.right = RightPanel::Masking;
                     app.ui.view = ViewMode::Detail;
@@ -521,6 +584,35 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::AutoStack { gap: p.get("gap").and_then(Value::as_f64).unwrap_or(60.0) as f32 });
             Ok(Value::Null)
         }
+        "dialog.allMetadata" => {
+            let r = match app.session.execute("photo.allMetadata", p) {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e.to_string())),
+            };
+            let title = app.session.active().and_then(|id| app.session.catalog.photo(id)).map(|p| p.file_name.clone()).unwrap_or_default();
+            app.ui.dialog = Some(Dialog::AllMetadata { title, rows: r, search: String::new() });
+            Ok(Value::Null)
+        }
+        "dialog.smartAlbum" => {
+            // {id?}: edit that smart album's rules; without: a new one starting at Rating ≥ 3
+            let album = p
+                .get("id")
+                .and_then(Value::as_u64)
+                .and_then(|id| app.session.catalog.album(lightcraft_catalog::AlbumId(id)).filter(|a| a.is_smart()).cloned());
+            app.ui.dialog = Some(match album {
+                Some(a) => Dialog::SmartRules {
+                    id: Some(a.id.0),
+                    name: a.name.clone(),
+                    rules: a.smart.as_ref().and_then(|f| f.rule_set.clone()).unwrap_or_default(),
+                },
+                None => Dialog::SmartRules {
+                    id: None,
+                    name: p.get("name").and_then(Value::as_str).unwrap_or("").into(),
+                    rules: lightcraft_catalog::RuleSet { rules: vec![crate::panels::rules_editor::new_rule()], ..Default::default() },
+                },
+            });
+            Ok(Value::Null)
+        }
         "dialog.newSmartAlbum" => {
             app.ui.dialog = Some(Dialog::NewSmartAlbum { name: p.get("name").and_then(Value::as_str).unwrap_or("").into() });
             Ok(Value::Null)
@@ -535,7 +627,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         "dialog.labelNames" => {
             let names =
                 lightcraft_catalog::ColorLabel::ALL.iter().map(|l| app.session.catalog.custom_label_name(*l).unwrap_or("").to_string()).collect();
-            app.ui.dialog = Some(Dialog::LabelNames { names });
+            app.ui.dialog = Some(Dialog::LabelNames { names, save_as: String::new() });
             Ok(Value::Null)
         }
         "dialog.rename" => {
@@ -584,6 +676,60 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         "app.about" => {
             app.ui.dialog = Some(Dialog::About);
             Ok(Value::Null)
+        }
+        "photo.editInExternal" => {
+            // render an edit copy (stacked on the original), then open it in the editor
+            let mut params = p.clone();
+            if !params.is_object() {
+                params = json!({});
+            }
+            let r = match app.session.execute("photo.editExternal", &params) {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e.to_string())),
+            };
+            let path = r["path"].as_str().unwrap_or_default().to_string();
+            if let Some(id) = r["id"].as_u64() {
+                app.ui.external_edits.push(id);
+            }
+            let editor = p.get("app").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| app.ui.settings.external_editor.clone());
+            if let Some(f) = app.services.open_with.as_mut()
+                && let Err(e) = f(&path, &editor)
+            {
+                app.toast(&ctx, format!("Couldn't open the editor: {e}"));
+            }
+            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            app.toast(&ctx, format!("{name} opened for editing; it is stacked with the original"));
+            Ok(r)
+        }
+        "app.whatsNew" => {
+            app.ui.dialog = Some(Dialog::WhatsNew);
+            Ok(json!({"text": crate::panels::dialogs::WHATS_NEW}))
+        }
+        "app.systemInfo" => {
+            let info = app.session.execute("library.info", &json!({})).unwrap_or_default();
+            let gpu = (lightcraft_engine::gpu::ready() && lightcraft_engine::gpu::available()).then(lightcraft_engine::gpu::adapter_name).flatten();
+            let mb = |b: u64| format!("{:.0} MB", b as f64 / (1u64 << 20) as f64);
+            let mut rows = vec![
+                ("Version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+                ("System".to_string(), format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)),
+                ("CPU threads".to_string(), std::thread::available_parallelism().map(|n| n.get().to_string()).unwrap_or_else(|_| "?".into())),
+                ("GPU".to_string(), gpu.unwrap_or_else(|| "none (CPU rendering)".into())),
+                ("GPU rendering".to_string(), if app.ui.settings.gpu { "on".into() } else { "off".into() }),
+                ("Memory budget".to_string(), mb(lightcraft_engine::memory::default_budget() as u64)),
+                ("Preview size".to_string(), format!("{} px", app.ui.settings.preview_edge)),
+                ("Photos".to_string(), info["photos"].to_string()),
+                ("Albums".to_string(), info["albums"].to_string()),
+            ];
+            if let Some(dir) = info["dir"].as_str().or(info["path"].as_str()) {
+                rows.push(("Library".into(), dir.to_string()));
+            }
+            rows.push(("Frame time".into(), format!("{:.1} ms ({:.0} fps)", app.perf.frame_ms, app.perf.fps)));
+            rows.push(("Last loupe render".into(), format!("{:.0} ms", app.renderer.last_main_ms)));
+            let r = json!(rows.iter().map(|(k, v)| json!({"label": k, "value": v})).collect::<Vec<_>>());
+            if p.get("open").and_then(Value::as_bool).unwrap_or(true) {
+                app.ui.dialog = Some(Dialog::SystemInfo { rows });
+            }
+            Ok(r)
         }
         "app.shortcuts" => {
             app.ui.dialog = Some(Dialog::Shortcuts);
@@ -675,11 +821,25 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             if let Ok(v) = &r {
                 let n = v["imported"].as_array().map_or(0, Vec::len);
                 let failed = v["failed"].as_array().map_or(0, Vec::len);
-                let msg = match (n, failed) {
+                let mut msg = match (n, failed) {
                     (0, 0) => "No new presets".to_string(),
                     (n, 0) => format!("Imported {n} preset{}", if n == 1 { "" } else { "s" }),
                     (n, f) => format!("Imported {n} preset{}, {f} file{} not readable", if n == 1 { "" } else { "s" }, if f == 1 { "" } else { "s" }),
                 };
+                // settings with no counterpart here (the other editor's profiles, masks…)
+                let mut skipped: Vec<&str> = v["imported"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|i| i["unmapped"].as_array().into_iter().flatten())
+                    .filter_map(Value::as_str)
+                    .collect();
+                skipped.sort_unstable();
+                skipped.dedup();
+                if !skipped.is_empty() {
+                    let names: Vec<&str> = skipped.iter().take(3).copied().collect();
+                    msg += &format!(" — not carried over: {}{}", names.join(", "), if skipped.len() > 3 { "…" } else { "" });
+                }
                 app.toast(&ctx, msg);
                 if n > 0 {
                     app.ui.presets = true;
@@ -715,7 +875,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         }
         "app.export" => crate::control::export_active(app, p),
         "app.showInFinder" => show_in_finder(app),
-        "app.discord" | "app.website" | "app.github" | "app.artcraft" | "app.help" => {
+        "app.discord" | "app.website" | "app.github" | "app.artcraft" | "app.help" | "app.feedback" => {
             let url = crate::links::url_of(id).unwrap_or(crate::links::WEBSITE);
             crate::links::open(app, url)
         }

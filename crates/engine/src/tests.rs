@@ -434,3 +434,155 @@ fn auto_bw_mix_separates_colours() {
     s.execute("edit.undo", &json!({})).unwrap();
     assert_ne!(active_dev(&s).treatment, lightcraft_develop::Treatment::Bw, "one undo step");
 }
+
+#[test]
+fn auto_sync_carries_only_the_changed_settings() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = demo();
+    let ids: Vec<u64> = s.catalog.photos().take(3).map(|p| p.id.0).collect();
+    // the second photo has its own contrast, which must survive
+    s.execute("library.select", &json!({"ids": [ids[1]]})).unwrap();
+    s.execute("develop.set", &json!({"control": "light.contrast", "value": 25})).unwrap();
+    s.execute("library.select", &json!({"ids": ids})).unwrap();
+    s.selection.active = Some(PhotoId(ids[0]));
+    assert_eq!(s.execute("develop.autoSync", &json!({})).unwrap(), json!({"on": true}));
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.7})).unwrap();
+    for id in &ids {
+        assert_eq!(s.develop_of(PhotoId(*id)).unwrap().light.exposure, 0.7, "photo {id}");
+    }
+    assert_eq!(s.develop_of(PhotoId(ids[1])).unwrap().light.contrast, 25.0, "untouched settings stay");
+    // a slider drag syncs once, on release
+    let shadows: Vec<f64> = ids.iter().map(|id| s.develop_of(PhotoId(*id)).unwrap().light.shadows).collect();
+    s.begin_interaction("Shadows").unwrap();
+    let mut d = (*s.develop_of(PhotoId(ids[0])).unwrap()).clone();
+    d.light.shadows = 40.0;
+    s.set_develop(PhotoId(ids[0]), d, "Shadows").unwrap();
+    assert_eq!(s.develop_of(PhotoId(ids[2])).unwrap().light.shadows, shadows[2], "not while dragging");
+    s.end_interaction().unwrap();
+    assert_eq!(s.develop_of(PhotoId(ids[2])).unwrap().light.shadows, 40.0);
+    // one undo step reverts every photo
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(ids.iter().map(|id| s.develop_of(PhotoId(*id)).unwrap().light.shadows).collect::<Vec<_>>(), shadows);
+    // spot removal belongs to one photo
+    let mut d = (*s.develop_of(PhotoId(ids[0])).unwrap()).clone();
+    d.spots.push(lightcraft_develop::Spot::default());
+    s.set_develop(PhotoId(ids[0]), d, "Remove").unwrap();
+    assert!(s.develop_of(PhotoId(ids[1])).unwrap().spots.is_empty());
+    // off: only the active photo
+    s.execute("develop.autoSync", &json!({"on": false})).unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": -1})).unwrap();
+    assert_eq!(s.develop_of(PhotoId(ids[1])).unwrap().light.exposure, 0.7);
+}
+
+#[test]
+fn json_delta_keeps_only_changes() {
+    let a = json!({"light": {"exposure": 0, "contrast": 5}, "masks": [1], "x": 1});
+    let b = json!({"light": {"exposure": 1, "contrast": 5}, "masks": [1, 2], "x": 1});
+    assert_eq!(crate::json_delta(&a, &b), Some(json!({"light": {"exposure": 1}, "masks": [1, 2]})));
+    assert_eq!(crate::json_delta(&a, &a), None);
+}
+
+#[test]
+fn build_previews_fills_the_cache() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = demo();
+    let ids: Vec<u64> = s.catalog.photos().take(3).map(|p| p.id.0).collect();
+    let cached = |s: &mut Session, id: u64| {
+        let t = s.thumb_job(PhotoId(id), 512).unwrap();
+        let (c, k) = t.cache.clone().unwrap();
+        let q = s.quick_view_job(PhotoId(id), 1024, true).unwrap();
+        let (vc, vk) = q.cached[0].clone();
+        (c.get(k).is_some(), vc.get(vk).is_some())
+    };
+    assert_eq!(cached(&mut s, ids[0]), (false, false));
+    let r = s.execute("library.buildPreviews", &json!({"ids": [ids[0], ids[1]], "size": "standard", "edge": 512, "wait": true})).unwrap();
+    assert_eq!((r["total"].as_u64(), r["done"].as_u64(), r["failed"].as_u64(), r["running"].as_bool()), (Some(2), Some(2), Some(0), Some(false)));
+    // view previews are written to the cache in the background
+    let t0 = std::time::Instant::now();
+    while cached(&mut s, ids[1]) != (true, true) && t0.elapsed().as_secs() < 20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(cached(&mut s, ids[0]), (true, true), "thumbnail and loupe view are ready");
+    assert_eq!(cached(&mut s, ids[2]), (false, false), "only the photos asked for");
+    // background build: returns at once, progress by command
+    let r = s.execute("library.buildPreviews", &json!({"ids": [ids[2]], "edge": 512})).unwrap();
+    assert_eq!(r["total"], 1);
+    let t0 = std::time::Instant::now();
+    loop {
+        let p = s.execute("library.previewProgress", &json!({})).unwrap();
+        if p["running"] == false {
+            assert_eq!(p["done"], 1);
+            break;
+        }
+        assert!(t0.elapsed().as_secs() < 60, "build finishes");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(s.execute("library.buildPreviews", &json!({"size": "huge"})).is_err());
+}
+
+/// Colour range: a click samples the colour under it, so the mask selects that colour (white
+/// in the mask view) and not a different one; ⇧ adds samples, up to five.
+#[test]
+fn color_range_sampling_selects_the_clicked_colour() {
+    use lightcraft_pipeline::{MaskView, Overlay};
+    let mut s = demo();
+    // a flower: magenta petals at the centre, green around them
+    let id = s.catalog.photos().find(|p| p.meta.keywords.iter().any(|k| k == "flower")).unwrap().id;
+    s.execute("library.select", &json!({"ids": [id.0]})).unwrap();
+    s.execute("mask.add", &json!({"kind": "colorRange"})).unwrap();
+    let mask = |s: &mut Session| {
+        let m = s.develop_of(id).unwrap().masks[0].clone();
+        let job = s.render_job(id, 200, 200, false, true).unwrap().with_overlay(Overlay::Mask {
+            id: m.id as u16,
+            view: MaskView::WhiteOnBlack,
+            color: [255, 0, 0],
+            opacity: 100,
+        });
+        job.run().rendered.unwrap().image
+    };
+    let at =
+        |img: &lightcraft_raster::Rgba8, x: f64, y: f64| img.data[(y * img.height as f64) as usize * img.width + (x * img.width as f64) as usize][0];
+    let r = s.execute("mask.sampleColor", &json!({"x": 0.5, "y": 0.5})).unwrap();
+    assert_eq!(r["samples"].as_array().unwrap().len(), 1);
+    let img = mask(&mut s);
+    let (centre, corner) = (at(&img, 0.5, 0.5), at(&img, 0.03, 0.03));
+    assert!(centre > 200 && corner < centre / 2, "the sampled colour is selected: centre {centre}, corner {corner}");
+    // ⇧-click adds, at most five
+    for _ in 0..6 {
+        s.execute("mask.sampleColor", &json!({"x": 0.03, "y": 0.03, "add": true})).unwrap();
+    }
+    let n = s.execute("mask.sampleColor", &json!({"x": 0.5, "y": 0.52, "add": true})).unwrap()["samples"].as_array().unwrap().len();
+    assert_eq!(n, 5);
+    assert!(at(&mask(&mut s), 0.03, 0.03) > 200, "the added colour is selected too");
+    // a plain click starts over
+    assert_eq!(s.execute("mask.sampleColor", &json!({"x": 0.5, "y": 0.5})).unwrap()["samples"].as_array().unwrap().len(), 1);
+    assert!(s.execute("mask.sampleColor", &json!({"x": 1.5, "y": 0.5})).is_err());
+}
+
+#[test]
+fn leaving_an_edited_photo_keeps_an_auto_version() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = demo();
+    let ids: Vec<u64> = s.catalog.photos().take(2).map(|p| p.id.0).collect();
+    s.execute("library.select", &json!({"ids": [ids[0]]})).unwrap();
+    let before = s.catalog.photo(PhotoId(ids[0])).unwrap().versions.len();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.4})).unwrap();
+    let undo = s.undo.len();
+    s.execute("library.select", &json!({"ids": [ids[1]]})).unwrap();
+    let v = s.catalog.photo(PhotoId(ids[0])).unwrap().versions.clone();
+    assert_eq!(v.len(), before + 1);
+    assert!(v.last().unwrap().auto && v.last().unwrap().settings.light.exposure == 0.4);
+    assert_eq!(s.undo.len(), undo, "not an undo step");
+    // back and away again without changes: nothing new
+    s.execute("library.select", &json!({"ids": [ids[0]]})).unwrap();
+    s.execute("library.select", &json!({"ids": [ids[1]]})).unwrap();
+    assert_eq!(s.catalog.photo(PhotoId(ids[0])).unwrap().versions.len(), before + 1);
+    // at most AUTO_VERSIONS
+    for i in 0..(crate::AUTO_VERSIONS + 5) {
+        s.execute("library.select", &json!({"ids": [ids[0]]})).unwrap();
+        s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.01 * i as f64 + 0.5})).unwrap();
+        s.execute("library.select", &json!({"ids": [ids[1]]})).unwrap();
+    }
+    let autos = s.catalog.photo(PhotoId(ids[0])).unwrap().versions.iter().filter(|v| v.auto).count();
+    assert_eq!(autos, crate::AUTO_VERSIONS);
+}

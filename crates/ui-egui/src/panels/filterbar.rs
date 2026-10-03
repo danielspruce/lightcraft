@@ -84,13 +84,6 @@ fn picker(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, current: &str, a
     }
 }
 
-fn distinct(mut v: Vec<String>) -> Vec<String> {
-    v.retain(|s| !s.trim().is_empty());
-    v.sort_by_key(|s| s.to_lowercase());
-    v.dedup();
-    v
-}
-
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     // one row when there is room, else the metadata pickers and actions go to a second row
@@ -168,15 +161,30 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 
     // colour labels
     caption(ui, "Label");
+    // several labels can be on at once (any of them matches)
+    let mut chosen: Vec<ColorLabel> = f.labels.clone();
+    if let Some(l) = f.label
+        && !chosen.contains(&l)
+    {
+        chosen.push(l);
+    }
     for l in ColorLabel::ALL {
-        let on = f.label == Some(l);
+        let on = chosen.contains(&l);
         let name = format!("{l:?}").to_lowercase();
-        let tip = format!("{} label", app.session.catalog.label_name(l));
+        let tip = format!("{} label (click more labels to show any of them)", app.session.catalog.label_name(l));
         let resp = toggle(ui, &format!("label-{name}"), on, &tip, |p, r, _| {
             p.circle_filled(r.center(), 5.5, label_color(l));
         });
         if resp.clicked() {
-            filter(app, json!({"label": if on { Value::Null } else { json!(name) }}));
+            let mut next = chosen.clone();
+            if on {
+                next.retain(|x| *x != l);
+            } else {
+                next.push(l);
+            }
+            next.sort();
+            let names: Vec<String> = next.iter().map(|x| format!("{x:?}").to_lowercase()).collect();
+            filter(app, json!({"label": Value::Null, "labels": names}));
         }
     }
     ui.add_space(14.0);
@@ -235,10 +243,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 
     // metadata pickers
     let ui: &mut egui::Ui = if two_rows { &mut row2 } else { &mut row1 };
-    let photos: Vec<_> = app.session.catalog.photos().filter(|p| p.in_library()).cloned().collect();
-    let cameras = distinct(photos.iter().map(|p| p.meta.camera.clone()).collect());
-    let lenses = distinct(photos.iter().map(|p| p.meta.lens.clone()).collect());
-    let keywords: Vec<String> = app.session.catalog.keywords().into_iter().map(|(k, _)| k).collect();
+    let values = app.caches.filter_values(&app.session.catalog);
+    let (cameras, lenses, keywords) = (values.cameras.clone(), values.lenses.clone(), values.keywords.clone());
     for (id, key, all_label, current, values) in [
         ("camera", "camera", "Camera", f.camera.clone(), cameras),
         ("lens", "lens", "Lens", f.lens.clone(), lenses),

@@ -46,13 +46,15 @@ pub type PickFolder = Box<dyn FnMut() -> Option<String>>;
 pub type RevealFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 /// Open a URL in the user's browser.
 pub type OpenUrlFn = Box<dyn FnMut(&str) -> Result<(), String>>;
+/// Open a file in an application (`app` = "" for the system's default one).
+pub type OpenWithFn = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 
 /// Platform services injected by the host app (desktop or web).
 #[derive(Default)]
 pub struct Services {
     /// Show an open dialog for photos; returns paths.
     pub pick_files: Option<PickFiles>,
-    /// Open dialog for preset files (`.lcpreset`, `.xmp`).
+    /// Open dialog for preset files (`.lcpreset`, `.xmp`, `.lrtemplate`, `.zip`, `.dng`).
     pub pick_preset_files: Option<PickFiles>,
     /// Save dialog for an exported `.lcpreset` file.
     pub save_preset_file: Option<SaveFile>,
@@ -67,6 +69,8 @@ pub struct Services {
     pub pick_folder: Option<PickFolder>,
     /// Open a web link in the browser (Help menu, About, Discord button).
     pub open_url: Option<OpenUrlFn>,
+    /// Open a file in an external editor (Edit in External Editor; desktop only).
+    pub open_with: Option<OpenWithFn>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -76,6 +80,9 @@ pub struct Perf {
 }
 
 pub struct LightcraftApp {
+    /// Per-catalog-revision caches of library-wide results the panels show every frame
+    /// (expensive on big libraries).
+    pub caches: Caches,
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
@@ -145,6 +152,7 @@ impl LightcraftApp {
             services,
             renderer: render::Renderer::default(),
             perf: Perf::default(),
+            caches: Caches::default(),
             integrated_titlebar: false,
             native_menu: false,
             native_shortcuts: Default::default(),
@@ -196,6 +204,54 @@ impl LightcraftApp {
     }
 
     /// Show a transient toast at the bottom of the canvas (like the reference app's HUD).
+    /// Advance a running slideshow (wrapping around at the end).
+    fn slideshow_tick(&mut self, ctx: &egui::Context) {
+        let Some((interval, due, paused)) = self.ui.slideshow else { return };
+        if !self.ui.fullscreen {
+            self.ui.slideshow = None;
+            return;
+        }
+        if paused {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if now >= due {
+            let vis = self.session.visible_cloned();
+            if let Some(cur) = self.session.active()
+                && !vis.is_empty()
+            {
+                let i = vis.iter().position(|x| *x == cur).map_or(0, |i| (i + 1) % vis.len());
+                let _ = self.run("library.select", serde_json::json!({"ids": [vis[i].0]}));
+            }
+            self.ui.slideshow = Some((interval, now + interval, false));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((due - now).clamp(0.05, interval)));
+    }
+
+    /// Announce the start and end of a Build Previews run.
+    fn preview_build_status(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        let Some(b) = self.session.preview_build.clone() else { return };
+        let key = std::sync::Arc::as_ptr(&b) as usize;
+        if b.finished.load(Ordering::Relaxed) {
+            if self.ui.preview_build_seen != Some((key, true)) {
+                self.ui.preview_build_seen = Some((key, true));
+                let (done, failed) = (b.done.load(Ordering::Relaxed), b.failed.load(Ordering::Relaxed));
+                let mut msg = format!("Previews ready for {done} photo{}", if done == 1 { "" } else { "s" });
+                if failed > 0 {
+                    msg.push_str(&format!(" · {failed} couldn't be rendered"));
+                }
+                self.toast(ctx, msg);
+            }
+        } else {
+            if self.ui.preview_build_seen != Some((key, false)) {
+                self.ui.preview_build_seen = Some((key, false));
+                self.toast(ctx, format!("Building previews for {} photos…", b.total));
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         let t = ctx.input(|i| i.time);
         self.ui.toast = Some((text.into(), t + 1.4));
@@ -353,6 +409,34 @@ impl LightcraftApp {
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
         import::tick(self, ctx);
+        self.preview_build_status(ctx);
+        self.slideshow_tick(ctx);
+        // back from an external editor: pick up the files it saved
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.ui.was_focused && !self.ui.external_edits.is_empty() {
+            let ids = self.ui.external_edits.clone();
+            if let Ok(r) = self.session.execute("photo.reload", &serde_json::json!({"ids": ids}))
+                && r["reloaded"].as_array().is_some_and(|a| !a.is_empty())
+            {
+                self.toast(ctx, "Updated the edits saved in the external editor");
+            }
+        }
+        self.ui.was_focused = focused;
+        // auto import: scan the watched folder every few seconds
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.session.import_defaults.auto_folder.is_some() {
+            let now = ctx.input(|i| i.time);
+            if now - self.ui.auto_import_at >= 3.0 {
+                self.ui.auto_import_at = now;
+                if let Ok(r) = self.session.execute("library.autoImportScan", &serde_json::json!({})) {
+                    let n = r["imported"].as_array().map_or(0, Vec::len);
+                    if n > 0 {
+                        self.toast(ctx, format!("Auto Import: added {n} photo{}", if n == 1 { "" } else { "s" }));
+                    }
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_secs(3));
+        }
         self.session.persist_if_dirty();
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
@@ -363,8 +447,13 @@ impl LightcraftApp {
         {
             let dropped: Vec<String> =
                 ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().to_string()).filter(|p| !p.is_empty()).collect());
-            if !dropped.is_empty() {
-                let _ = self.run("library.import", serde_json::json!({"paths": dropped}));
+            // preset files import as presets, everything else as photos
+            let (presets, photos): (Vec<String>, Vec<String>) = dropped.into_iter().partition(|p| is_preset_file(p));
+            if !presets.is_empty() {
+                let _ = self.run("file.importPresets", serde_json::json!({"paths": presets}));
+            }
+            if !photos.is_empty() {
+                let _ = self.run("library.import", serde_json::json!({"paths": photos}));
             }
         }
     }
@@ -442,6 +531,7 @@ impl LightcraftApp {
         if self.ui.fullscreen {
             // full-screen preview: the photo alone on black
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::BLACK)).show(ui, |ui| panels::detail::show(self, ui));
+            panels::second::show(self, &ctx);
             panels::dialogs::show(self, &ctx);
             panels::toast(self, &ctx);
             self.widgets = widgets::take_registry(&ctx);
@@ -471,6 +561,7 @@ impl LightcraftApp {
             state::ViewMode::Compare => panels::compare::show_compare(self, ui),
             state::ViewMode::Survey => panels::compare::show_survey(self, ui),
         });
+        panels::second::show(self, &ctx);
         panels::dialogs::show(self, &ctx);
         import::progress(self, &ctx);
         export_task::poll(self, &ctx);
@@ -517,4 +608,155 @@ pub struct HoverPreview {
 
 pub fn is_bw(d: &lightcraft_develop::DevelopSettings) -> bool {
     d.treatment == lightcraft_develop::Treatment::Bw || d.profile.id == "lc.mono" || d.profile.id.starts_with("lc.bw.")
+}
+
+/// Files dropped on the window that are presets rather than photos.
+pub fn is_preset_file(path: &str) -> bool {
+    let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    ["lcpreset", "lrtemplate", "xmp", "zip"].contains(&ext.as_str())
+}
+
+#[cfg(test)]
+mod drop_tests {
+    #[test]
+    fn dropped_presets_are_told_apart_from_photos() {
+        for p in ["/a/Look.lrtemplate", "/a/b.XMP", "/a/pack.zip", "/a/x.lcpreset"] {
+            assert!(super::is_preset_file(p), "{p}");
+        }
+        for p in ["/a/IMG_1.CR2", "/a/b.dng", "/a/c.jpg", "/a/folder"] {
+            assert!(!super::is_preset_file(p), "{p}");
+        }
+    }
+}
+
+/// Results recomputed only when the catalog (or their inputs) change.
+#[derive(Default)]
+pub struct Caches {
+    keyword_tree: Option<(u64, std::sync::Arc<Vec<lightcraft_catalog::KeywordNode>>)>,
+    date_runs: Option<(u64, std::sync::Arc<Vec<lightcraft_catalog::DateRun>>)>,
+    suggestions: Option<(u64, std::sync::Arc<Vec<String>>)>,
+    counts: Option<(u64, LibraryCounts)>,
+    date_groups: Option<(u64, std::sync::Arc<Vec<lightcraft_catalog::DateGroup>>)>,
+    filter_values: Option<(u64, std::sync::Arc<FilterValues>)>,
+    /// The grid's layout (by photos, shapes, width, thumbnail size, grouping).
+    pub grid_layout: Option<(u64, std::sync::Arc<panels::grid::GridLayout>)>,
+}
+
+/// The left panel's counts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LibraryCounts {
+    pub total: usize,
+    pub picks: usize,
+    pub deleted: usize,
+}
+
+/// The values the filter bar's pickers offer.
+#[derive(Clone, Debug, Default)]
+pub struct FilterValues {
+    pub cameras: Vec<String>,
+    pub lenses: Vec<String>,
+    pub keywords: Vec<String>,
+}
+
+pub(crate) fn key_of(parts: impl std::hash::Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    BuildHasherDefault::<DefaultHasher>::default().hash_one(parts)
+}
+
+impl Caches {
+    /// The library's keyword tree.
+    pub fn keyword_tree(&mut self, cat: &lightcraft_catalog::Catalog) -> std::sync::Arc<Vec<lightcraft_catalog::KeywordNode>> {
+        match &self.keyword_tree {
+            Some((r, t)) if *r == cat.revision => t.clone(),
+            _ => {
+                let t = std::sync::Arc::new(cat.keyword_tree());
+                self.keyword_tree = Some((cat.revision, t.clone()));
+                t
+            }
+        }
+    }
+    /// All Photos / Picks / Recently Deleted counts.
+    pub fn counts(&mut self, cat: &lightcraft_catalog::Catalog) -> LibraryCounts {
+        if let Some((r, c)) = self.counts
+            && r == cat.revision
+        {
+            return c;
+        }
+        let mut c = LibraryCounts::default();
+        for p in cat.photos() {
+            if p.in_library() {
+                c.total += 1;
+                if p.flag == lightcraft_catalog::Flag::Pick {
+                    c.picks += 1;
+                }
+            } else if p.deleted && !p.local {
+                c.deleted += 1;
+            }
+        }
+        self.counts = Some((cat.revision, c));
+        c
+    }
+    /// The By Date tree.
+    pub fn date_groups(&mut self, cat: &lightcraft_catalog::Catalog) -> std::sync::Arc<Vec<lightcraft_catalog::DateGroup>> {
+        match &self.date_groups {
+            Some((r, g)) if *r == cat.revision => g.clone(),
+            _ => {
+                let g = std::sync::Arc::new(cat.date_groups());
+                self.date_groups = Some((cat.revision, g.clone()));
+                g
+            }
+        }
+    }
+    /// Cameras, lenses and keywords in the library (filter bar pickers).
+    pub fn filter_values(&mut self, cat: &lightcraft_catalog::Catalog) -> std::sync::Arc<FilterValues> {
+        match &self.filter_values {
+            Some((r, v)) if *r == cat.revision => v.clone(),
+            _ => {
+                let distinct = |mut v: Vec<String>| {
+                    v.retain(|s| !s.trim().is_empty());
+                    v.sort_by_key(|s| s.to_lowercase());
+                    v.dedup();
+                    v
+                };
+                let lib = || cat.photos().filter(|p| p.in_library());
+                let v = std::sync::Arc::new(FilterValues {
+                    cameras: distinct(lib().map(|p| p.meta.camera.clone()).collect()),
+                    lenses: distinct(lib().map(|p| p.meta.lens.clone()).collect()),
+                    keywords: cat.keywords().into_iter().map(|(k, _)| k).collect(),
+                });
+                self.filter_values = Some((cat.revision, v.clone()));
+                v
+            }
+        }
+    }
+    /// Date headers for `ids` in the grid.
+    pub fn date_runs(
+        &mut self,
+        cat: &lightcraft_catalog::Catalog,
+        ids: &[lightcraft_catalog::PhotoId],
+        key: lightcraft_catalog::SortKey,
+        by: lightcraft_catalog::GroupBy,
+    ) -> std::sync::Arc<Vec<lightcraft_catalog::DateRun>> {
+        let k = key_of((cat.revision, ids, format!("{key:?}{by:?}")));
+        match &self.date_runs {
+            Some((h, r)) if *h == k => r.clone(),
+            _ => {
+                let r = std::sync::Arc::new(cat.date_runs(ids, key, by));
+                self.date_runs = Some((k, r.clone()));
+                r
+            }
+        }
+    }
+    /// Keyword suggestions for a photo with `current` keywords and the typed `prefix`.
+    pub fn suggestions(&mut self, cat: &lightcraft_catalog::Catalog, current: &[String], prefix: &str, n: usize) -> std::sync::Arc<Vec<String>> {
+        let k = key_of((cat.revision, current, prefix, n));
+        match &self.suggestions {
+            Some((h, v)) if *h == k => v.clone(),
+            _ => {
+                let v = std::sync::Arc::new(cat.keyword_suggestions(current, prefix, n));
+                self.suggestions = Some((k, v.clone()));
+                v
+            }
+        }
+    }
 }

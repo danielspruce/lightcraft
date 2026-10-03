@@ -12,6 +12,7 @@
 
 pub mod cmd;
 pub mod crs;
+pub mod crs_masks;
 pub mod demo;
 pub mod devices;
 pub mod export;
@@ -21,9 +22,11 @@ pub mod library;
 pub mod media;
 pub mod memory;
 pub mod merge;
+pub mod preset_import;
 pub mod presets;
 pub mod rename;
 pub mod sidecar;
+pub mod smart;
 mod view;
 
 use std::sync::Arc;
@@ -68,6 +71,9 @@ pub struct Interaction {
 }
 
 pub struct Session {
+    /// Auto Sync: edits to the active photo also change the other selected photos (the settings
+    /// that changed, nothing else).
+    pub auto_sync: bool,
     pub catalog: Catalog,
     pub source: LibrarySource,
     pub filter: Filter,
@@ -118,11 +124,25 @@ pub struct Session {
     pub metadata_presets: Vec<cmd::metadata::MetadataPreset>,
     /// Saved filter-bar settings (`filter.*`), persisted in prefs.json.
     pub filter_presets: Vec<cmd::filters::FilterPreset>,
+    /// Saved colour-label name sets.
+    pub label_sets: Vec<cmd::manage::LabelSet>,
+    /// The target album B adds to (`None` = the Quick Collection).
+    pub target_album: Option<lightcraft_catalog::AlbumId>,
+    /// Auto import: files seen in the watched folder and their size then (a file is imported once
+    /// its size held between two scans).
+    pub auto_import_seen: std::collections::HashMap<String, u64>,
+    /// Keyword sets (⌥1–⌥9 apply the current set's keywords), the one in use (`None` = Recent
+    /// Keywords) and the recently added keywords, newest first.
+    pub keyword_sets: Vec<cmd::keywords::KeywordSet>,
+    pub keyword_set: Option<String>,
+    pub recent_keywords: Vec<String>,
     /// Before/After: the "before" settings chosen per photo (this session; default: the photo's
     /// import state). See `cmd/before.rs`.
     pub before: std::collections::HashMap<PhotoId, Arc<DevelopSettings>>,
     /// File probes from the last import review (`library.importPreview`), reused by the import.
     pub import_probes: std::collections::HashMap<String, media::ProbeInfo>,
+    /// The last (or running) Build Previews.
+    pub preview_build: Option<std::sync::Arc<cmd::previews::PreviewBuild>>,
     /// Develop defaults applied on import (persisted in prefs.json).
     pub import_defaults: import::ImportDefaults,
     /// Disk budget of the library's thumbnail cache in MB (0 = default; persisted in prefs.json).
@@ -138,6 +158,7 @@ impl Default for Session {
 impl Session {
     pub fn new() -> Session {
         Session {
+            auto_sync: false,
             catalog: Catalog::new(),
             source: LibrarySource::All,
             filter: Filter::default(),
@@ -169,8 +190,15 @@ impl Session {
             export_presets: Vec::new(),
             metadata_presets: Vec::new(),
             filter_presets: Vec::new(),
+            label_sets: Vec::new(),
+            target_album: None,
+            auto_import_seen: Default::default(),
+            keyword_sets: Vec::new(),
+            keyword_set: None,
+            recent_keywords: Vec::new(),
             before: Default::default(),
             import_probes: Default::default(),
+            preview_build: None,
             import_defaults: import::ImportDefaults::default(),
             cache_mb: 0,
         }
@@ -196,6 +224,9 @@ impl Session {
         self.depth -= 1;
         if self.depth == 0 && was_active.is_some() && self.active() != was_active {
             self.previous_active = was_active;
+            if let Some(left) = was_active {
+                self.auto_version(left);
+            }
         }
         if r.is_ok() && spec.journal && self.depth == 0 {
             self.journal.push((id.to_string(), params.clone()));
@@ -231,6 +262,30 @@ impl Session {
         }
         self.redo.clear();
         Ok(())
+    }
+
+    /// Leaving photo `id` after editing it: keep its settings as an automatic version (when they
+    /// differ from its latest version; at most [`AUTO_VERSIONS`] auto versions, oldest dropped).
+    /// Saved with the library but not an undo step.
+    pub fn auto_version(&mut self, id: PhotoId) {
+        let Some(p) = self.catalog.photo(id) else { return };
+        if !p.is_edited() || p.versions.last().is_some_and(|v| *v.settings == *p.develop) || self.interaction.is_some() {
+            return;
+        }
+        let mut versions = p.versions.clone();
+        let created = (self.clock)();
+        let name = lightcraft_catalog::dates::display_time(&created);
+        versions.push(lightcraft_catalog::Version { name, created, settings: p.develop.clone(), auto: true });
+        let autos = versions.iter().filter(|v| v.auto).count();
+        if autos > AUTO_VERSIONS
+            && let Some(i) = versions.iter().position(|v| v.auto)
+        {
+            versions.remove(i);
+        }
+        let op = Op::SetVersions { id, versions };
+        if self.catalog.apply(op.clone()).is_ok() {
+            self.pending_log.push(op);
+        }
     }
 
     /// Fold the last `n` undo steps into one (commands that commit step by step because each op
@@ -318,8 +373,44 @@ impl Session {
         {
             return self.apply_silent(Op::SetDevelop { id, settings, label: label.into(), edited: Some(now) });
         }
-        let op = self.develop_op(id, (*settings).clone(), label).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?;
+        let mut ops = vec![self.develop_op(id, (*settings).clone(), label).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?];
+        ops.extend(self.auto_sync_ops(id, &settings, label));
+        let op = if ops.len() == 1 { ops.remove(0) } else { Op::Batch { ops } };
         self.commit(label, op)
+    }
+
+    /// With Auto Sync on, the ops that carry an edit of the active photo `id` (to `new`) over to the
+    /// other selected photos: only the settings that changed; never spot removal or red eye (they
+    /// belong to one photo's pixels), nor history / snapshot restores.
+    fn auto_sync_ops(&self, id: PhotoId, new: &DevelopSettings, label: &str) -> Vec<Op> {
+        if !self.auto_sync
+            || self.active() != Some(id)
+            || self.selection.ids.len() < 2
+            || label.starts_with("History:")
+            || label.starts_with("Restore ")
+        {
+            return Vec::new();
+        }
+        let Some(old) = self.develop_of(id) else { return Vec::new() };
+        let Some(mut delta) = json_delta(&old.to_json(), &new.to_json()) else { return Vec::new() };
+        if let Some(o) = delta.as_object_mut() {
+            for k in ["spots", "red_eye", "version"] {
+                o.remove(k);
+            }
+            if o.is_empty() {
+                return Vec::new();
+            }
+        }
+        self.selection
+            .ids
+            .iter()
+            .filter(|x| **x != id)
+            .filter_map(|x| self.develop_of(*x).map(|d| (*x, d)))
+            .filter_map(|(x, d)| {
+                let synced = lightcraft_develop::apply_partial(&d, &delta, 1.0);
+                (synced != *d).then(|| self.develop_op(x, synced, label)).flatten()
+            })
+            .collect()
     }
 
     /// The op that sets a photo's develop settings and appends a History entry (for batches).
@@ -367,6 +458,8 @@ impl Session {
     pub fn visible(&mut self) -> &[PhotoId] {
         let key = (self.catalog.revision, format!("{:?}|{:?}|{:?}|{:?}", self.source, self.filter, self.sort, self.browse));
         if self.visible_key.as_ref() != Some(&key) {
+            // "in the last N days" rules count back from the session's clock
+            lightcraft_catalog::rules::set_now(Some((self.clock)()));
             let mut f = self.source.to_filter(&self.filter, &self.catalog);
             if self.source == LibrarySource::Folder {
                 // no folder chosen: nothing (an empty path matches nothing)
@@ -421,6 +514,22 @@ impl Session {
             return vec![PhotoId(id)];
         }
         if self.selection.ids.is_empty() { self.selection.active.into_iter().collect() } else { self.selection.ids.clone() }
+    }
+}
+
+/// Automatic versions kept per photo.
+pub const AUTO_VERSIONS: usize = 20;
+
+/// The parts of `new` that differ from `old` (objects recurse; anything else is taken whole).
+pub fn json_delta(old: &Value, new: &Value) -> Option<Value> {
+    match (old, new) {
+        (Value::Object(a), Value::Object(b)) => {
+            let m: serde_json::Map<String, Value> =
+                b.iter().filter_map(|(k, nv)| json_delta(a.get(k).unwrap_or(&Value::Null), nv).map(|d| (k.clone(), d))).collect();
+            (!m.is_empty()).then_some(Value::Object(m))
+        }
+        (a, b) if a == b => None,
+        (_, b) => Some(b.clone()),
     }
 }
 

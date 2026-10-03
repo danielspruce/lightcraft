@@ -315,3 +315,89 @@ fn import_review_preview_and_options() {
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&lib);
 }
+
+/// Label sets: built-ins, the one in use, saving (persisted with the library's prefs) and the
+/// names written to / read from XMP.
+#[test]
+fn label_sets_and_xmp_label_names() {
+    use lightcraft_catalog::ColorLabel;
+    let dir = std::env::temp_dir().join(format!("lc-labelsets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut s = Session::new();
+    s.open_library(&dir, true).unwrap();
+    let sets = s.execute("label.sets", &json!({})).unwrap();
+    assert_eq!(sets["current"], "Colors");
+    s.execute("label.applySet", &json!({"name": "review"})).unwrap();
+    assert_eq!(s.catalog.label_name(ColorLabel::Green), "Approved");
+    assert_eq!(s.execute("label.sets", &json!({})).unwrap()["current"], "Review");
+    // tweak one name, save as a user set; built-in names are refused
+    s.execute("label.setNames", &json!({"names": {"purple": "Client"}})).unwrap();
+    assert_eq!(s.execute("label.sets", &json!({})).unwrap()["current"], json!(null));
+    assert!(s.execute("label.saveSet", &json!({"name": "Colors"})).is_err());
+    s.execute("label.saveSet", &json!({"name": "Studio"})).unwrap();
+    s.execute("label.applySet", &json!({"name": "Colors"})).unwrap();
+    assert_eq!(s.catalog.custom_label_name(ColorLabel::Green), None);
+    drop(s);
+    let mut s = Session::new();
+    s.open_library(&dir, false).unwrap();
+    s.execute("label.applySet", &json!({"name": "studio"})).unwrap();
+    assert_eq!(s.catalog.label_name(ColorLabel::Purple), "Client");
+    // XMP: the label's name is written, and read back through the names
+    let mut p = lightcraft_catalog::Photo::new(
+        lightcraft_catalog::PhotoId(1),
+        lightcraft_catalog::Source::Demo { scene: 0 },
+        "a.jpg",
+        "JPEG",
+        4,
+        4,
+        "2026-01-01T00:00:00",
+    );
+    p.label = Some(ColorLabel::Green);
+    let x = crate::sidecar::sidecar_packet(&p, &s.catalog);
+    assert!(x.contains("Approved"), "{x}");
+    let sc = crate::sidecar::parse_sidecar(&x, false).unwrap().resolve_label(&s.catalog);
+    assert_eq!(sc.label, Some(Some(ColorLabel::Green)));
+    let plain = crate::sidecar::parse_sidecar(&x.replace("Approved", "Blue"), false).unwrap().resolve_label(&s.catalog);
+    assert_eq!(plain.label, Some(Some(ColorLabel::Blue)), "colour names still work");
+    s.execute("label.deleteSet", &json!({"name": "Studio"})).unwrap();
+    assert!(s.execute("label.deleteSet", &json!({"name": "Review"})).is_err(), "built-ins stay");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keyword sets: Recent Keywords fill as keywords are added; ⌥N toggles keyword N on the
+/// selection (added unless every photo has it) without reshuffling the numbers; user sets.
+#[test]
+fn keyword_sets_and_recent_keywords() {
+    let mut s = Session::with_demo();
+    let ids: Vec<u64> = s.catalog.photos().take(2).map(|p| p.id.0).collect();
+    s.execute("library.select", &json!({"ids": [ids[0]]})).unwrap();
+    s.execute("photo.setMeta", &json!({"addKeywords": ["beach", "sunset"]})).unwrap();
+    s.execute("photo.setMeta", &json!({"addKeywords": ["family"]})).unwrap();
+    let sets = s.execute("keyword.sets", &json!({})).unwrap();
+    assert_eq!(sets["current"], "Recent Keywords");
+    assert_eq!(sets["keywords"], json!(["family", "beach", "sunset"]), "newest first");
+    // ⌥3 on both photos: added to the one without it, so both have it
+    s.execute("library.select", &json!({"ids": ids})).unwrap();
+    let r = s.execute("keyword.toggleFromSet", &json!({"index": 3})).unwrap();
+    assert_eq!((r["keyword"].as_str(), r["added"].as_bool()), (Some("sunset"), Some(true)));
+    let has = |s: &Session, id: u64, k: &str| s.catalog.photo(lightcraft_catalog::PhotoId(id)).unwrap().meta.keywords.iter().any(|x| x == k);
+    assert!(has(&s, ids[0], "sunset") && has(&s, ids[1], "sunset"));
+    assert_eq!(s.execute("keyword.sets", &json!({})).unwrap()["keywords"][2], "sunset", "the numbers stay put");
+    // again: everyone has it, so it's removed
+    let r = s.execute("keyword.toggleFromSet", &json!({"index": 3})).unwrap();
+    assert_eq!(r["added"], false);
+    assert!(!has(&s, ids[0], "sunset") && !has(&s, ids[1], "sunset"));
+    assert_eq!(s.execute("keyword.toggleFromSet", &json!({"index": 9})).unwrap()["changed"], 0, "an empty slot does nothing");
+    assert!(s.execute("keyword.toggleFromSet", &json!({"index": 10})).is_err());
+    // a saved set becomes current; deleting it falls back to Recent Keywords
+    let r = s.execute("keyword.saveSet", &json!({"name": "Wedding", "keywords": ["ceremony", "rings", "first dance"]})).unwrap();
+    assert_eq!((r["current"].as_str(), r["keywords"][1].as_str()), (Some("Wedding"), Some("rings")));
+    s.execute("keyword.toggleFromSet", &json!({"index": 2})).unwrap();
+    assert!(has(&s, ids[1], "rings"));
+    assert!(s.execute("keyword.saveSet", &json!({"name": "Recent Keywords"})).is_err(), "reserved");
+    s.execute("keyword.useSet", &json!({"name": "Recent Keywords"})).unwrap();
+    s.execute("keyword.useSet", &json!({"name": "wedding"})).unwrap();
+    assert_eq!(s.keyword_set.as_deref(), Some("Wedding"));
+    s.execute("keyword.deleteSet", &json!({"name": "Wedding"})).unwrap();
+    assert_eq!(s.execute("keyword.sets", &json!({})).unwrap()["current"], "Recent Keywords");
+}
