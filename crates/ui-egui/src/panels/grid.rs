@@ -223,15 +223,21 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let stacks = app.caches.grid.stacks(stats, &app.session.catalog, generation);
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
-    // bring the active photo into view when it changes (keyboard, click, command) or the grid
-    // comes back on screen; otherwise the scroll position is the user's, especially while browsing
-    // a local folder.
-    let scroll_to: Option<Rect> = if app.session.source != lightcraft_engine::LibrarySource::Folder
-        && follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active)
-    {
-        active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
-    } else {
-        None
+    // Keep the active photo in view when navigating the library or when the grid returns to
+    // screen, but preserve the user's scroll position while browsing a local folder and while
+    // restoring the grid on the first frame.
+    let scroll_to: Option<Rect> = {
+        let key = egui::Id::new("grid-last-active");
+        let last: Option<PhotoId> = ui.data(|d| d.get_temp(key));
+        ui.data_mut(|d| d.insert_temp(key, active));
+        if app.session.source != lightcraft_engine::LibrarySource::Folder
+            && last.is_some()
+            && follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active)
+        {
+            active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
+        } else {
+            None
+        }
     };
     let mut visible_ids = HashSet::new();
     let mut visited = 0u64;
