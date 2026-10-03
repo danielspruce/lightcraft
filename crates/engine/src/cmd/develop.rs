@@ -267,7 +267,15 @@ pub fn specs() -> Vec<CommandSpec> {
             let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.auto", e))?;
             let info = s.source_info(id);
             let d = s.develop_of(id).unwrap_or_default();
-            let a = lightcraft_pipeline::auto::auto_tone(&src, &info, &d);
+            let mut a = lightcraft_pipeline::auto::auto_tone(&src, &info, &d);
+            if info.raw
+                && let Some(loader) = &s.media.preview_loader
+                && let Some(photo) = s.catalog.photo(id)
+                && let lightcraft_catalog::Source::File { path } = &photo.source
+                && let Some(preview) = loader(path, 256)
+            {
+                a = lightcraft_pipeline::auto_reference::refine(&src, &info, &d, &preview, a);
+            }
             edit(s, "develop.auto", "Auto", |d| {
                 d.light.exposure = a.exposure;
                 d.light.contrast = a.contrast;
@@ -277,6 +285,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 d.light.blacks = a.blacks;
                 d.color.vibrance = a.vibrance;
                 d.color.saturation = a.saturation;
+                if let Some(calibration) = a.calibration {
+                    d.calibration = calibration;
+                }
                 Ok(())
             })?;
             Ok(serde_json::to_value(a).unwrap_or_default())

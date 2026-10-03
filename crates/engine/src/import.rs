@@ -97,6 +97,8 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
+    /// Run Auto on imported photos that have no XMP sidecar or embedded XMP packet.
+    pub auto_without_xmp: bool,
 }
 
 /// How copies are filed in the destination. The date is the capture time, else the time of the
@@ -1303,6 +1305,7 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                         purge.push(*old);
                     }
                 }
+                let has_xmp = sidecar.is_some();
                 let sidecar = sidecar.map(|sc| sc.resolve_label(&s.catalog)).filter(|sc| *sc != crate::sidecar::SidecarData::default());
                 // a copy is catalogued under its new name
                 let name = Path::new(&stored).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
@@ -1365,6 +1368,16 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
     }
     if !placed.is_empty() {
         finish_moves(s, placed, log0, &mut report);
+    }
+    if !auto_ids.is_empty() {
+        let selection = s.selection.clone();
+        for id in auto_ids {
+            s.selection = crate::view::Selection::single(id);
+            // A malformed or unsupported source must not turn a successful import into a partial
+            // failure. The photo remains imported with its normal defaults.
+            let _ = s.execute("develop.auto", &serde_json::Value::Null);
+        }
+        s.selection = selection;
     }
     Ok(report)
 }
