@@ -224,8 +224,11 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
     // bring the active photo into view when it changes (keyboard, click, command) or the grid
-    // comes back on screen; otherwise the scroll position is the user's
-    let scroll_to: Option<Rect> = if follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active) {
+    // comes back on screen; otherwise the scroll position is the user's, especially while browsing
+    // a local folder.
+    let scroll_to: Option<Rect> = if app.session.source != lightcraft_engine::LibrarySource::Folder
+        && follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active)
+    {
         active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
     } else {
         None

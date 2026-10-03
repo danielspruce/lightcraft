@@ -320,10 +320,9 @@ impl ImportRun {
                 }
                 let prepared = match lightcraft_engine::guard::catch("import", || job.prepare_files(chunk.to_vec(), &cancel)) {
                     Ok(p) => p,
-                    Err(_) => break, // logged; the files readied so far are added
+                    Err(_) => break,
                 };
                 if let Err(unsent) = tx.send(prepared) {
-                    // the import was dropped: nothing will add these, so take back what a Move placed
                     unsent.0.rollback();
                     break;
                 }
@@ -430,7 +429,6 @@ pub fn browse(app: &mut LightcraftApp, path: &str, subfolders: Option<bool>) -> 
     let subfolders = subfolders.unwrap_or_else(|| app.session.browse.as_ref().is_some_and(|b| b.subfolders));
     let running = app.scan.as_ref().is_some_and(|t| t.browse) || app.import.as_ref().is_some_and(|t| t.browse);
     if running && app.session.browse.as_ref().is_some_and(|b| b.path == dir_s && b.subfolders == subfolders) {
-        // already reading this folder: clicking it again must not restart the progress
         app.session.source = lightcraft_engine::LibrarySource::Folder;
         return Ok(json!({"path": dir_s, "subfolders": subfolders, "scanning": true}));
     }
@@ -495,7 +493,6 @@ pub fn poll_scan(app: &mut LightcraftApp, ctx: &egui::Context) {
     }
     app.session.import_probes = out.probes;
     if task.browse {
-        // what the library doesn't know yet joins the Local view
         let queue: Vec<String> =
             out.candidates.iter().filter(|c| c.duplicate != Some("path".into()) && c.error.is_none()).map(|c| c.path.clone()).collect();
         if !queue.is_empty() {
@@ -550,7 +547,6 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
             cancel = r.clicked();
         });
     if cancel {
-        // the worker stops at its next file; don't wait for it (a NAS read can take a while)
         task.progress.cancel.store(true, Ordering::Relaxed);
         app.scan = None;
     }
@@ -561,6 +557,7 @@ impl ScanTask {
     pub fn status(&self) -> Value {
         json!({"done": self.progress.done.load(Ordering::Relaxed), "total": self.progress.total.load(Ordering::Relaxed)})
     }
+}
 }
 
 /// Start importing the dialog's checked files (the dialog's OK / `ui.dialog.confirm`).
@@ -807,6 +804,35 @@ fn show_existing(app: &mut LightcraftApp, ctx: &egui::Context, existing: &[u64])
 /// The progress window while an import runs, with Cancel (files already copied or added stay;
 /// nothing new is started).
 pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
+    if let Some(task) = &app.import_scan {
+        let t = Tokens::get(ctx);
+        let status = task.progress.lock().map(|p| p.clone()).unwrap_or_default();
+        egui::Window::new("Scanning folder")
+            .title_bar(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
+            .fixed_size([620.0, 146.0])
+            .show(ctx, |ui| {
+                let label = if status.total == 0 {
+                    format!("{} · {} photos found", status.phase, status.done)
+                } else {
+                    format!("{} · {} of {}", status.phase, status.done, status.total)
+                };
+                ui.label(egui::RichText::new(label).color(t.text));
+                if status.total > 0 {
+                    ui.add(egui::ProgressBar::new(status.done as f32 / status.total as f32).desired_width(f32::INFINITY));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Searching folders; total file count is not known yet");
+                    });
+                }
+                for path in status.recent_paths.iter().rev() {
+                    ui.add(egui::Label::new(egui::RichText::new(path).small().color(t.text_dim)).truncate()).on_hover_text(path);
+                }
+            });
+        return;
+    }
     let Some(task) = &app.import else { return };
     let t = Tokens::get(ctx);
     let frac = task.done as f32 / task.total.max(1) as f32;
@@ -842,8 +868,9 @@ pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
 pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
     let t = Tokens::get(ui.ctx());
     let n = d.candidates.len();
-    let dups = d.candidates.iter().filter(|c| c.duplicate.is_some()).count();
-    let sel = d.selected_paths().len();
+    let (dups, sel) = d.candidates.iter().zip(&d.checked).fold((0, 0), |(dups, sel), (c, checked)| {
+        (dups + usize::from(c.duplicate.is_some()), sel + usize::from(*checked && c.duplicate.is_none() && c.error.is_none()))
+    });
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(crate::i18n::tr_format!("{n} found · {sel} selected", n = n, sel = sel)).color(t.text));
         if dups > 0 {
