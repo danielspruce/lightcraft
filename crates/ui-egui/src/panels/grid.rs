@@ -108,7 +108,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let key = egui::Id::new("grid-last-active");
         let last: Option<PhotoId> = ui.data(|d| d.get_temp(key));
         ui.data_mut(|d| d.insert_temp(key, active));
-        if app.session.source != lightcraft_engine::LibrarySource::Folder && last != active {
+        // Only follow an active-photo change observed after this grid has rendered at least
+        // once. A persisted selection on the first frame is not a navigation event; following it
+        // would discard the user's restored grid scroll position on startup or when returning.
+        if app.session.source != lightcraft_engine::LibrarySource::Folder && last.is_some() && last != active {
             active.and_then(|a| cells.iter().find(|c| c.id == a).map(|c| c.rect))
         } else {
             None
