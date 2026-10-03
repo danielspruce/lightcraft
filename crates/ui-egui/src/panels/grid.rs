@@ -93,12 +93,17 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let cells: Vec<Cell> = ids.iter().zip(&lay.cells).map(|(id, r)| Cell { id: *id, rect: *r }).collect();
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
-    // keep the active photo in view when it changes by keyboard
+    // Keep the active photo in view when navigating the library, but preserve the user's scroll
+    // position while browsing a local folder.
     let scroll_to: Option<Rect> = {
         let key = egui::Id::new("grid-last-active");
         let last: Option<PhotoId> = ui.data(|d| d.get_temp(key));
         ui.data_mut(|d| d.insert_temp(key, active));
-        if last != active { active.and_then(|a| cells.iter().find(|c| c.id == a).map(|c| c.rect)) } else { None }
+        if app.session.source != lightcraft_engine::LibrarySource::Folder && last != active {
+            active.and_then(|a| cells.iter().find(|c| c.id == a).map(|c| c.rect))
+        } else {
+            None
+        }
     };
     let stacks = app.session.catalog.stack_index();
     let mut visible_ids = HashSet::new();

@@ -5,9 +5,13 @@
 //! frame, with a progress window; the whole import is one undo step.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use lightcraft_engine::Session;
 use lightcraft_engine::import::ImportCandidate;
+use lightcraft_engine::media::ProbeInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::LightcraftApp;
 use crate::render::Slot;
@@ -16,6 +20,14 @@ use crate::widgets::register;
 
 /// Files per batch (one batch per frame, so the progress window updates).
 const BATCH: usize = 8;
+
+pub type ImportScanResult = (Vec<ImportCandidate>, HashMap<String, ProbeInfo>);
+
+#[derive(Debug)]
+pub struct ImportScanTask {
+    receiver: Receiver<ImportScanResult>,
+    progress: lightcraft_engine::import::ImportScanProgressState,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -69,19 +81,59 @@ pub struct ImportTask {
     first: Option<u64>,
 }
 
-/// Scan `paths` and open the review dialog. Returns the candidate counts.
+/// Start scanning `paths` off the UI thread; the review dialog opens when scanning finishes.
 pub fn open(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value, String> {
-    let r = app.session.execute("library.importPreview", &json!({"paths": paths})).map_err(|e| e.to_string())?;
-    let candidates: Vec<ImportCandidate> = serde_json::from_value(r["candidates"].clone()).unwrap_or_default();
-    if candidates.is_empty() {
-        app.toast(&egui::Context::default(), "No photos found");
-        return Ok(json!({"candidates": 0}));
+    let mut snapshot = Session::new();
+    snapshot.catalog = app.session.catalog.clone();
+    snapshot.media.file_probe = app.session.media.file_probe.clone();
+    snapshot.import_probes = app.session.import_probes.clone();
+    let skip = app.session.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(lightcraft_engine::import::ImportScanProgress {
+        phase: "Starting scan".into(),
+        ..Default::default()
+    }));
+    let worker_progress = std::sync::Arc::clone(&progress);
+    let (tx, rx) = std::sync::mpsc::channel();
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        let candidates = lightcraft_engine::import::scan_with_progress(&mut snapshot, &paths, skip.as_deref(), Some(&worker_progress));
+        let _ = tx.send((candidates, snapshot.import_probes));
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let candidates = lightcraft_engine::import::scan_with_progress(&mut snapshot, &paths, skip.as_deref(), Some(&worker_progress));
+        let _ = tx.send((candidates, snapshot.import_probes));
     }
-    app.renderer.forget_imports();
-    let d = ImportDialog::new(candidates);
-    let out = json!({"candidates": d.candidates.len(), "duplicates": r["duplicates"]});
-    app.ui.dialog = Some(crate::state::Dialog::Import { opts: Box::new(d) });
-    Ok(out)
+    app.import_scan = Some(ImportScanTask { receiver: rx, progress });
+    app.ui.dialog = None;
+    Ok(json!({"scanning": true}))
+}
+
+/// Move a finished background scan into the import review dialog.
+pub fn poll_scan(app: &mut LightcraftApp, ctx: &egui::Context) {
+    let result = match app.import_scan.as_ref().map(|task| task.receiver.try_recv()) {
+        Some(Ok(result)) => Some(Ok(result)),
+        Some(Err(TryRecvError::Empty)) | None => None,
+        Some(Err(TryRecvError::Disconnected)) => Some(Err(())),
+    };
+    match result {
+        None => {}
+        Some(Ok((candidates, probes))) => {
+            app.import_scan = None;
+            app.session.import_probes.extend(probes);
+            if candidates.is_empty() {
+                app.toast(ctx, "No photos found");
+                return;
+            }
+            app.renderer.forget_imports();
+            app.ui.dialog = Some(crate::state::Dialog::Import { opts: Box::new(ImportDialog::new(candidates)) });
+            ctx.request_repaint();
+        }
+        Some(Err(())) => {
+            app.import_scan = None;
+            app.toast(ctx, "Folder scan stopped unexpectedly");
+        }
+    }
 }
 
 /// Start importing the dialog's checked files (the dialog's OK / `ui.dialog.confirm`).
@@ -157,6 +209,35 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
 
 /// The progress window while an import runs.
 pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
+    if let Some(task) = &app.import_scan {
+        let t = Tokens::get(ctx);
+        let status = task.progress.lock().map(|p| p.clone()).unwrap_or_default();
+        egui::Window::new("Scanning folder")
+            .title_bar(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
+            .fixed_size([620.0, 146.0])
+            .show(ctx, |ui| {
+                let label = if status.total == 0 {
+                    format!("{} · {} photos found", status.phase, status.done)
+                } else {
+                    format!("{} · {} of {}", status.phase, status.done, status.total)
+                };
+                ui.label(egui::RichText::new(label).color(t.text));
+                if status.total > 0 {
+                    ui.add(egui::ProgressBar::new(status.done as f32 / status.total as f32).desired_width(f32::INFINITY));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Searching folders; total file count is not known yet");
+                    });
+                }
+                for path in status.recent_paths.iter().rev() {
+                    ui.add(egui::Label::new(egui::RichText::new(path).small().color(t.text_dim)).truncate()).on_hover_text(path);
+                }
+            });
+        return;
+    }
     let Some(task) = &app.import else { return };
     let t = Tokens::get(ctx);
     let frac = task.done as f32 / task.total.max(1) as f32;
@@ -174,8 +255,9 @@ pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
 pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
     let t = Tokens::get(ui.ctx());
     let n = d.candidates.len();
-    let dups = d.candidates.iter().filter(|c| c.duplicate.is_some()).count();
-    let sel = d.selected_paths().len();
+    let (dups, sel) = d.candidates.iter().zip(&d.checked).fold((0, 0), |(dups, sel), (c, checked)| {
+        (dups + usize::from(c.duplicate.is_some()), sel + usize::from(*checked && c.duplicate.is_none() && c.error.is_none()))
+    });
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("{n} found · {sel} selected")).color(t.text));
         if dups > 0 {
@@ -199,7 +281,10 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
     let rows = n.div_ceil(cols);
     egui::ScrollArea::vertical().id_salt("import-grid").max_height(330.0).auto_shrink([false, true]).show_viewport(ui, |ui, viewport| {
         let (area, _) = ui.allocate_exact_size(vec2(avail, rows as f32 * (cell + 26.0)), Sense::hover());
-        for i in 0..n {
+        let row_height = cell + 26.0;
+        let first_row = (viewport.min.y / row_height).floor().max(0.0) as usize;
+        let last_row = (viewport.max.y / row_height).ceil().max(0.0) as usize;
+        for i in first_row.saturating_mul(cols)..n.min(last_row.saturating_add(1).saturating_mul(cols)) {
             let (c, r) = (i % cols, i / cols);
             let local = Rect::from_min_size(pos2(c as f32 * (cell + 6.0), r as f32 * (cell + 26.0)), vec2(cell, cell + 20.0));
             if !local.intersects(viewport.expand(cell)) {

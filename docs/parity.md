@@ -57,6 +57,8 @@ Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **69.9%** of 500 in-sco
 
 Ordered by tier, then user value, then (low) effort. Take the first one nobody is working on.
 
+Auto quality (LR-EDIT-AUTO): improved tonal depth and adaptive colour; subject-aware finishing remains an open quality gap.
+
 1. **LR-IMP-FORMATS** (P0) — CR3, compressed NEF/RAF/ORF, RW2 v4 (preview only today); HEIC/AVIF decode (no
     permissive pure-Rust decoder yet). High value, high effort (clean sources needed).
 2. **LR-EDIT-OPTICS-PROFILE** (P1) — a lens-profile database of our own (embedded DNG/maker corrections work today).
@@ -98,7 +100,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-IMP-ADD-DIALOG | Add photos/folders | P0 | ✅ | `cmd:file.addPhotos`, `cmd:library.importPreview`, `cmd:library.import` (`mode`, `album`, `albumName`, `preset`, `keywords`), `crates/ui-egui/src/import.rs` | review dialog: candidate grid with thumbnails and checkboxes (duplicates by path/content marked and unchecked), destination, album (existing/new), preset, keywords; batched import with a progress window; one undo step. Drag-and-drop still imports directly |
+| LR-IMP-ADD-DIALOG | Add photos/folders | P0 | ✅ | `cmd:file.addPhotos`, `cmd:library.importPreview`, `cmd:library.import` (`mode`, `album`, `albumName`, `preset`, `keywords`), `crates/ui-egui/src/import.rs` | review dialog: background folder scan with live phase, discovered/probed counts and recent paths; candidate grid draws visible rows only, with thumbnails and checkboxes (duplicates by path/content marked and unchecked), destination, album (existing/new), preset, keywords; batched import with a progress window; one undo step. Drag-and-drop still imports directly |
 | LR-IMP-DRAGDROP | Drop files/folders to import | P0 | ✅ | `crates/ui-egui/src/lib.rs` (dropped files → `cmd:library.import`) | dropping onto a specific album not supported |
 | LR-IMP-DUPES | Skip duplicates by content | P1 | ✅ | `crates/engine/src/import.rs`, `crates/engine/src/tests_import.rs` | |
 | LR-IMP-DEVICE | Import from camera/card | P1 | ✅ | `cmd:library.devices`, `cmd:file.addFromDevice`, `crates/engine/src/devices.rs` | mounted volumes with a DCIM folder (macOS /Volumes, Linux /media and /run/media, Windows drive letters); File → Add from Device → the import review, copying into the library by default; no PTP/MTP (cameras that don't mount as a disk) |
@@ -200,7 +202,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-EDIT-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | |
+| LR-EDIT-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | Auto measures midtone separation independently of extreme tails, limits raw shadow lift while retaining a deep black point, and adapts vibrance/saturation to image colourfulness; heuristic finish, no subject-aware aesthetic model |
 | LR-EDIT-BW | Black & white | P0 | ✅ | `cmd:develop.treatment` | |
 | LR-EDIT-HDR-MODE | HDR editing | P2 | ⬜ | | |
 | LR-EDIT-LIGHT-EXPOSURE | Exposure | P0 | ✅ | `ctl:light.exposure` | |

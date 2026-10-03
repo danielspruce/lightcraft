@@ -96,6 +96,30 @@ pub struct ImportReport {
     pub sidecars: usize,
 }
 
+/// Live status for preparing the import review. `total` is unknown during folder traversal.
+#[derive(Clone, Debug, Default)]
+pub struct ImportScanProgress {
+    pub phase: String,
+    pub done: usize,
+    pub total: usize,
+    pub recent_paths: Vec<String>,
+}
+
+pub type ImportScanProgressState = std::sync::Arc<std::sync::Mutex<ImportScanProgress>>;
+
+fn progress_update(state: &ImportScanProgressState, phase: &str, done: usize, total: usize, path: &str) {
+    let Ok(mut p) = state.lock() else { return };
+    p.phase = phase.to_string();
+    p.done = done;
+    p.total = total;
+    if !path.is_empty() && p.recent_paths.last().is_none_or(|last| last != path) {
+        p.recent_paths.push(path.to_string());
+        if p.recent_paths.len() > 3 {
+            p.recent_paths.remove(0);
+        }
+    }
+}
+
 /// The develop settings a photo gets on import: raws start from their as-shot white balance with
 /// default sharpening / colour noise reduction, and file-embedded lens corrections on (as the
 /// camera intended); a user default preset ([`ImportDefaults`]) goes on top.
@@ -192,26 +216,36 @@ pub fn is_supported(path: &Path) -> bool {
 /// Expand files and folders (recursively) into supported files. `skip` (e.g. the library folder)
 /// is never descended into.
 pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
-    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool) {
+    expand_with_progress(paths, skip, None)
+}
+
+fn expand_with_progress(paths: &[String], skip: Option<&Path>, progress: Option<&ImportScanProgressState>) -> Vec<String> {
+    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool, progress: Option<&ImportScanProgressState>) {
         let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
         if (hidden && !top) || skip.is_some_and(|s| p == s) {
             return;
         }
         if p.is_dir() {
+            if let Some(progress) = progress {
+                progress_update(progress, "Finding photos", out.len(), 0, &p.to_string_lossy());
+            }
             let Ok(rd) = std::fs::read_dir(p) else { return };
             let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             v.sort();
             for c in v {
-                walk(&c, skip, out, false);
+                walk(&c, skip, out, false, progress);
             }
         } else if top || is_supported(p) {
             // explicitly named files are attempted even with an unknown extension (sniffed)
             out.push(p.to_string_lossy().to_string());
+            if let Some(progress) = progress {
+                progress_update(progress, "Finding photos", out.len(), 0, &p.to_string_lossy());
+            }
         }
     }
     let mut out = Vec::new();
     for p in paths {
-        walk(Path::new(p), skip, &mut out, true);
+        walk(Path::new(p), skip, &mut out, true, progress);
     }
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()));
@@ -219,6 +253,10 @@ pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
 }
 
 fn probe_all(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
+    probe_all_with_progress(s, paths, None)
+}
+
+fn probe_all_with_progress(s: &Session, paths: &[String], progress: Option<&ImportScanProgressState>) -> Vec<Result<ProbeInfo, String>> {
     let Some(probe) = s.media.file_probe.clone() else {
         return paths
             .iter()
@@ -236,6 +274,7 @@ fn probe_all(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
+            let completed = std::sync::atomic::AtomicUsize::new(0);
             let out = std::sync::Mutex::new(&mut results);
             std::thread::scope(|sc| {
                 for _ in 0..n {
@@ -246,6 +285,10 @@ fn probe_all(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
                                 break;
                             }
                             let r = probe(&paths[i]);
+                            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if let Some(progress) = progress {
+                                progress_update(progress, "Checking photos", done, paths.len(), &paths[i]);
+                            }
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
                         }
                     });
@@ -254,7 +297,18 @@ fn probe_all(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo, String>> {
             return results.into_iter().map(|r| r.unwrap_or_else(|| Err("not probed".into()))).collect();
         }
     }
-    paths.iter().map(|p| probe(p)).collect()
+    let mut done = 0;
+    paths
+        .iter()
+        .map(|p| {
+            let r = probe(p);
+            done += 1;
+            if let Some(progress) = progress {
+                progress_update(progress, "Checking photos", done, paths.len(), p);
+            }
+            r
+        })
+        .collect()
 }
 
 /// `Originals/YYYY/YYYY-MM-DD/name`, made unique.
@@ -283,7 +337,23 @@ fn copy_into_library(lib: &Path, src: &str, date: &str) -> Result<String, String
 /// import that follows.
 pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
     let lib_dir = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
-    let files = expand(paths, lib_dir.as_deref());
+    scan_with_skip(s, paths, lib_dir.as_deref())
+}
+
+/// Scan paths while excluding an optional library directory. The UI uses this with a lightweight
+/// session snapshot so folder traversal and file probing can run away from the UI thread.
+pub fn scan_with_skip(s: &mut Session, paths: &[String], skip: Option<&Path>) -> Vec<ImportCandidate> {
+    scan_with_progress(s, paths, skip, None)
+}
+
+/// Scan paths and publish progress while expanding folders and probing images.
+pub fn scan_with_progress(
+    s: &mut Session,
+    paths: &[String],
+    skip: Option<&Path>,
+    progress: Option<&ImportScanProgressState>,
+) -> Vec<ImportCandidate> {
+    let files = expand_with_progress(paths, skip, progress);
     let mut by_path: HashMap<String, PhotoId> = HashMap::new();
     let mut by_hash: HashMap<String, PhotoId> = HashMap::new();
     for p in s.catalog.photos() {
@@ -305,10 +375,16 @@ pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
         })
         .collect();
     let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
-    let mut fresh = probe_all(s, &missing).into_iter();
+    if let Some(progress) = progress {
+        progress_update(progress, "Checking photos", 0, missing.len(), "");
+    }
+    let mut fresh = probe_all_with_progress(s, &missing, progress).into_iter();
     let probed: Vec<Result<ProbeInfo, String>> =
         cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
     crate::memory::release();
+    if let Some(progress) = progress {
+        progress_update(progress, "Preparing review", files.len(), files.len(), "");
+    }
     let mut probes: HashMap<String, Result<ProbeInfo, String>> = todo.into_iter().zip(probed).collect();
     let mut seen_hash: HashMap<String, Option<u64>> = by_hash.into_iter().map(|(h, id)| (h, Some(id.0))).collect();
     let mut out = Vec::with_capacity(files.len());

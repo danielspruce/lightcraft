@@ -118,6 +118,8 @@ pub struct LightcraftApp {
     pub merge: merge::MergeState,
     /// An import in progress (the import review dialog's batches).
     pub import: Option<import::ImportTask>,
+    /// A folder import preview being scanned off the UI thread.
+    pub import_scan: Option<import::ImportScanTask>,
     /// A background export in progress.
     pub export: Option<export_task::ExportTask>,
     /// The files of the last finished background export (`ui.inspect` → `export.last`).
@@ -164,6 +166,7 @@ impl LightcraftApp {
             loupe_shown: None,
             merge: merge::MergeState::default(),
             import: None,
+            import_scan: None,
             export: None,
             last_export_result: None,
             hover_preview: None,
@@ -348,6 +351,7 @@ impl LightcraftApp {
         }
         self.renderer.poll(ctx, &mut self.session);
         merge::poll(self, ctx);
+        import::poll_scan(self, ctx);
         import::tick(self, ctx);
         self.session.persist_if_dirty();
         self.collect_screenshots(ctx);
