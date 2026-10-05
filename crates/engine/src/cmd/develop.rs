@@ -70,6 +70,34 @@ fn edit_version(s: &mut Session, p: &Value, c: &str, label: &str, f: impl FnOnce
     ok()
 }
 
+fn auto_for(s: &mut Session, id: PhotoId) -> Result<(DevelopSettings, lightcraft_pipeline::auto::AutoTone)> {
+    let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.auto", e))?;
+    let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+    let d = s.develop_of(id).unwrap_or_default();
+    let mut a = lightcraft_pipeline::auto::auto_tone(&src, &info, &d);
+    if info.raw
+        && let Some(loader) = &s.media.preview_loader
+        && let Some(photo) = s.catalog.photo(id)
+        && let lightcraft_catalog::Source::File { path } = &photo.source
+        && let Some(preview) = loader(path, 256)
+    {
+        a = lightcraft_pipeline::auto_reference::refine(&src, &info, &d, &preview, a);
+    }
+    let mut d = (*d).clone();
+    d.light.exposure = a.exposure;
+    d.light.contrast = a.contrast;
+    d.light.highlights = a.highlights;
+    d.light.shadows = a.shadows;
+    d.light.whites = a.whites;
+    d.light.blacks = a.blacks;
+    d.color.vibrance = a.vibrance;
+    d.color.saturation = a.saturation;
+    if let Some(calibration) = a.calibration {
+        d.calibration = calibration;
+    }
+    Ok((d, a))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -217,34 +245,30 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("develop.auto", "Auto Settings", ["Photo"], Some("Shift+A"), "{}", has_active, |s, _| {
             let id = active(s, "develop.auto")?;
-            let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.auto", e))?;
-            let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
-            let d = s.develop_of(id).unwrap_or_default();
-            let mut a = lightcraft_pipeline::auto::auto_tone(&src, &info, &d);
-            if info.raw
-                && let Some(loader) = &s.media.preview_loader
-                && let Some(photo) = s.catalog.photo(id)
-                && let lightcraft_catalog::Source::File { path } = &photo.source
-                && let Some(preview) = loader(path, 256)
-            {
-                a = lightcraft_pipeline::auto_reference::refine(&src, &info, &d, &preview, a);
-            }
-            edit(s, "develop.auto", "Auto", |d| {
-                d.light.exposure = a.exposure;
-                d.light.contrast = a.contrast;
-                d.light.highlights = a.highlights;
-                d.light.shadows = a.shadows;
-                d.light.whites = a.whites;
-                d.light.blacks = a.blacks;
-                d.color.vibrance = a.vibrance;
-                d.color.saturation = a.saturation;
-                if let Some(calibration) = a.calibration {
-                    d.calibration = calibration;
-                }
-                Ok(())
-            })?;
+            let (d, a) = auto_for(s, id)?;
+            s.set_develop(id, d, "Auto")?;
             Ok(serde_json::to_value(a).unwrap_or_default())
         }),
+        cmd!(
+            "develop.autoSelected",
+            "Auto Settings for Selected Photos",
+            ["Photo"],
+            None,
+            "{} — calculate Auto independently for each selected photo; one undo step",
+            has_selection,
+            |s, _| {
+                let ids = s.targets(&json!({}));
+                let mut ops = Vec::with_capacity(ids.len());
+                for &id in &ids {
+                    let (d, _) = auto_for(s, id)?;
+                    if let Some(op) = s.develop_op(id, d, "Auto") {
+                        ops.push(op);
+                    }
+                }
+                s.commit("Auto Selected Photos", Op::Batch { ops })?;
+                Ok(json!({"count": ids.len()}))
+            }
+        ),
         cmd!(
             "develop.wb",
             "White Balance",

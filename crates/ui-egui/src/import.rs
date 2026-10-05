@@ -238,7 +238,9 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     let steps = app.session.undo.len().saturating_sub(task.undo0);
     let label = format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
     app.session.merge_undo(steps, &label);
-    if !task.preserve_selection && let Some(f) = task.first {
+    if !task.preserve_selection
+        && let Some(f) = task.first
+    {
         let _ = app.run("library.select", json!({"ids": [f]}));
     }
     let mut msg = format!("Added {} photo{}", task.imported, if task.imported == 1 { "" } else { "s" });

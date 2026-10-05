@@ -12,22 +12,31 @@ use crate::{BlackLevel, Rect};
 use std::ops::Range;
 
 /// Black level per 2×2 CFA position (anchored at the active area origin) from masked sensor columns `cols` over
-/// rows `rows`. Falls back to 0 when the region is empty.
+/// rows `rows`. Uses the median: the crop boundary can include illuminated sensor columns,
+/// and hot pixels must not raise the black level. Falls back to 0 when the region is empty.
 pub(crate) fn black_from_columns(data: &[u16], width: usize, cols: Range<usize>, rows: Range<usize>, active: Rect) -> BlackLevel {
     let height = data.len() / width.max(1);
-    let (mut sum, mut n) = ([0f64; 4], [0u64; 4]);
+    let mut samples: [Vec<u16>; 4] = std::array::from_fn(|_| Vec::new());
     for y in rows.start..rows.end.min(height) {
         let py = (y as isize - active.y as isize).rem_euclid(2) as usize;
         for x in cols.start..cols.end.min(width) {
             let px = (x as isize - active.x as isize).rem_euclid(2) as usize;
-            sum[py * 2 + px] += data[y * width + x] as f64;
-            n[py * 2 + px] += 1;
+            samples[py * 2 + px].push(data[y * width + x]);
         }
     }
-    if n.contains(&0) {
+    if samples.iter().any(Vec::is_empty) {
         return BlackLevel::uniform(0.0);
     }
-    BlackLevel { repeat_rows: 2, repeat_cols: 2, values: (0..4).map(|i| (sum[i] / n[i] as f64) as f32).collect(), delta_h: vec![], delta_v: vec![] }
+    let values = samples
+        .iter_mut()
+        .map(|v| {
+            let mid = v.len() / 2;
+            let even = v.len() % 2 == 0;
+            let (lower, median, _) = v.select_nth_unstable(mid);
+            if even { (*lower.iter().max().unwrap() as f32 + *median as f32) * 0.5 } else { *median as f32 }
+        })
+        .collect();
+    BlackLevel { repeat_rows: 2, repeat_cols: 2, values, delta_h: vec![], delta_v: vec![] }
 }
 
 /// White level estimate: the saturation plateau if a noticeable number of samples sit at the maximum value,
@@ -78,6 +87,25 @@ mod tests {
         let b = black_from_columns(&data, 8, 0..4, 0..6, Rect::new(3, 1, 4, 5));
         assert_eq!(b.at(0, 0, 0, 1), 103.0);
         assert_eq!(black_from_columns(&data, 8, 0..0, 0..6, Rect::new(0, 0, 8, 6)), BlackLevel::uniform(0.0));
+    }
+
+    #[test]
+    fn black_columns_ignore_illuminated_crop_border_and_hot_pixels() {
+        // A crop border is not necessarily the optical-black boundary. Model a
+        // border with 28 dark columns followed by 12 illuminated ones, and an
+        // odd crop origin so each CFA plane must also be re-anchored correctly.
+        let width = 64;
+        let mut data: Vec<u16> = (0..width * 100)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                if x < 28 { [1024, 1026, 1028, 1030][(y % 2) * 2 + x % 2] } else { 4000 }
+            })
+            .collect();
+        data[width * 10 + 4] = 16383;
+        let b = black_from_columns(&data, width, 2..38, 3..99, Rect::new(40, 3, 24, 96));
+        assert_eq!(b.values, vec![1028.0, 1030.0, 1024.0, 1026.0]);
+        // A faint signal survives subtraction instead of being crushed below zero.
+        assert_eq!(1050.0 - b.at(0, 0, 0, 1), 22.0);
     }
 
     #[test]

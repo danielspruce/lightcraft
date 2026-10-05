@@ -57,7 +57,9 @@ Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **76.6%** of 500 in-sco
 
 Ordered by tier, then user value, then (low) effort. Take the first one nobody is working on.
 
-Auto quality (LR-EDIT-AUTO): RAW Auto now fits editable tone, colour and calibration controls against the embedded camera preview; exact matching of a separate edited JPEG and subject-aware finishing remain open quality gaps.
+Auto quality (LR-EDIT-AUTO): selected photos can each receive independently calculated Auto settings in one undoable batch. RAW Auto now fits editable tone, colour and calibration controls against the embedded camera preview; exact matching of a separate edited JPEG and subject-aware finishing remain open quality gaps.
+
+RAW shadow fidelity (LR-IMP-FORMATS): optical-black estimation rejects illuminated crop-border pixels and hot pixels, preventing crushed shadows in Canon CR2 files. Camera-specific colour calibration remains a gap for non-DNG RAWs.
 
 1. **LR-IMP-FORMATS** (P0) — CR3, compressed NEF/RAF/ORF, RW2 v4 (preview only today); HEIC/AVIF decode (no
     permissive pure-Rust decoder yet). High value, high effort (clean sources needed).
@@ -111,7 +113,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-IMP-PROFILES | Import profiles & presets | P1 | 🟡 | `cmd:file.importPresets`, `cmd:preset.import`, `crates/engine/src/preset_import.rs` | presets: .lcpreset, XMP, classic .lrtemplate, photos carrying edits ("DNG presets"), .zip bundles, folders (folder → group), drag & drop; masks (gradients, radial, brush, subject/sky, luminance/depth range) carried over; unmapped settings reported; no profile import (Adobe profile formats deliberately unsupported) |
 | LR-IMP-LOCAL | Work on files in place | P0 | ✅ | `cmd:library.browse`, `cmd:photo.addToLibrary`, `cmd:library.import` (mode add), `crates/engine/src/cmd/browse.rs`, `crates/ui-egui/src/panels/left.rs` (`local_section`), `crates/ui-egui/src/panels/grid.rs` (`folder_header`) | Local: browse Pictures / Desktop / Downloads / Home or any folder without adding it (breadcrumb, Include subfolders, Add N to My Photos); browsed photos stay out of All Photos, albums and counts; edits go to XMP sidecars; importing promotes them |
 | LR-IMP-SIDECAR-SPLIT | Separate XMP sidecar variants | P2 | ⬜ | `cmd:library.xmpPreferences` | sidecar naming option exists (stem/full), no split sidecars |
-| LR-IMP-FORMATS | Supported formats | P0 | 🟡 | `crates/codecs/src/lib.rs`, `crates/raw/src/lib.rs` | JPEG, PNG, TIFF, WebP, JXL, PSD, GIF, BMP; DNG (incl. lossy / Smart Preview DNG), CR2, ARW, NEF, RAF, RW2, PEF, ORF. Missing: CR3, compressed NEF/RAF/ORF, RW2 v4 (preview only), HEIC/AVIF decode |
+| LR-IMP-FORMATS | Supported formats | P0 | 🟡 | `crates/codecs/src/lib.rs`, `crates/raw/src/lib.rs`, `crates/raw/src/vendor/mod.rs` | JPEG, PNG, TIFF, WebP, JXL, PSD, GIF, BMP; DNG (incl. lossy / Smart Preview DNG), CR2, ARW, NEF, RAF, RW2, PEF, ORF. Robust optical-black estimation preserves CR2 shadows despite illuminated crop-border columns. Missing: camera-specific colour calibration for non-DNG RAWs; CR3, compressed NEF/RAF/ORF, RW2 v4 (preview only), HEIC/AVIF decode |
 | LR-IMP-CULL-AT-IMPORT | Culling analysis at import | P2 | ⬜ | | |
 | LR-IMP-DNG-CONVERT | Convert to DNG on import [Classic] | P2 | ✅ | `cmd:library.import` (`dng`), `crates/ui-egui/src/import.rs` | copy imports: Raw files ▸ Copy as DNG (lossless; the card is untouched) |
 
@@ -202,7 +204,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-EDIT-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | RAW Auto with as-shot WB and Color profile fits a rendered proxy to the embedded camera preview using bounded tone, colour and Calibration controls; a mild finish curve gives bright previews more depth. No usable preview / custom WB / creative profile falls back to histogram Auto. One undo step; no camera coefficients copied. `crates/pipeline/src/auto_reference.rs` |
+| LR-EDIT-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto`, `cmd:develop.autoSelected`, `crates/pipeline/src/auto.rs` | RAW Auto with as-shot WB and Color profile fits a rendered proxy to the embedded camera preview using bounded tone, colour and Calibration controls; a mild finish curve gives bright previews more depth. No usable preview / custom WB / creative profile falls back to histogram Auto. Auto All / Photo menu / context menu independently process the selection in one undo step; no camera coefficients copied. `crates/pipeline/src/auto_reference.rs` |
 | LR-EDIT-BW | Black & white | P0 | ✅ | `cmd:develop.treatment` | |
 | LR-EDIT-HDR-MODE | HDR editing | P2 | ⬜ | | |
 | LR-EDIT-LIGHT-EXPOSURE | Exposure | P0 | ✅ | `ctl:light.exposure` | |
@@ -218,7 +220,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-LIGHT-CURVE-TAT | Drag-on-image curve adjust | P1 | ✅ | `cmd:develop.targeted` (`target: curve`) | |
 | LR-EDIT-COLOR-WB-PRESET | White-balance presets | P0 | ✅ | `cmd:develop.wb` | |
 | LR-EDIT-COLOR-WB-PICKER | White-balance eyedropper | P0 | ✅ | `cmd:tool.wbPicker`, `cmd:develop.wbPick` | no magnified loupe while picking |
-| LR-EDIT-COLOR-TEMP | Temperature | P0 | ✅ | `ctl:wb.temp` | relative scale for non-raw in the UI |
+| LR-EDIT-COLOR-TEMP | Temperature | P0 | ✅ | `ctl:wb.temp` | relative scale for non-raw in the UI; gentle drags (10 K / pixel raw, 0.1 / pixel rendered), Shift for 10x precision; 1 K / 0.1 resolution |
 | LR-EDIT-COLOR-TINT | Tint | P0 | ✅ | `ctl:wb.tint` | |
 | LR-EDIT-COLOR-VIBRANCE | Vibrance | P0 | ✅ | `ctl:color.vibrance` | |
 | LR-EDIT-COLOR-SATURATION | Saturation | P0 | ✅ | `ctl:color.saturation` | |

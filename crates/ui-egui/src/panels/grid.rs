@@ -649,6 +649,10 @@ pub fn context_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if ui.button("Reset Edits").clicked() {
         let _ = app.run("develop.reset", json!({}));
     }
+    if ui.button("Auto Settings for Selected Photos").clicked() {
+        let _ = app.run("develop.autoSelected", json!({}));
+        ui.close();
+    }
     ui.menu_button("Photo Merge", |ui| {
         let n = app.session.targets(&json!({})).len();
         for (id, label) in [("dialog.mergeHdr", "HDR…"), ("dialog.mergePanorama", "Panorama…"), ("dialog.mergeHdrPanorama", "HDR Panorama…")] {

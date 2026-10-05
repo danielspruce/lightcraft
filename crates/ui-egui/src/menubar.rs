@@ -166,6 +166,7 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "@Photo Merge",
             "---",
             "develop.auto",
+            "develop.autoSelected",
             "develop.treatment",
             "develop.reset",
             "dialog.createPreset",
