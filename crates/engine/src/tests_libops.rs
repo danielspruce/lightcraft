@@ -110,6 +110,36 @@ fn path_of(s: &Session, id: u64) -> String {
     }
 }
 
+#[test]
+fn delete_from_disk_confirmation_shared_files_and_failures() {
+    let src = temp_dir("delete-disk");
+    write_png(&src.join("a.png"), 1);
+    write_png(&src.join("b.png"), 2);
+    let mut s = Session::new().with_fs();
+    let r = s.execute("library.import", &json!({"paths": [src.join("a.png"), src.join("b.png")]})).unwrap();
+    let ids: Vec<u64> = r["imported"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert!(s.execute("photo.deleteFromDisk", &json!({"ids": ids})).is_err());
+    assert!(src.join("a.png").exists());
+    s.execute("library.select", &json!({"ids": [ids[0]]})).unwrap();
+    s.execute("photo.virtualCopy", &json!({})).unwrap();
+    let copy = s.catalog.photos().find(|p| p.copy_of.is_some()).unwrap().id.0;
+    assert!(s.execute("photo.deleteFromDisk", &json!({"ids": [ids[0]], "confirmed": true})).is_err());
+    assert!(src.join("a.png").exists());
+    // A failed file remains in the catalog; successful files and shared copies are removed.
+    std::fs::remove_file(src.join("b.png")).unwrap();
+    std::fs::write(src.join("a.xmp"), b"keep sidecar").unwrap();
+    let err = s.execute("photo.deleteFromDisk", &json!({"ids": [ids[0], copy, ids[1]], "confirmed": true})).unwrap_err();
+    assert!(err.to_string().contains("Deleted 2 photos"), "{err}");
+    assert!(!src.join("a.png").exists());
+    assert!(src.join("a.xmp").exists());
+    assert!(s.catalog.photo(lightcraft_catalog::PhotoId(ids[0])).is_none());
+    assert!(s.catalog.photo(lightcraft_catalog::PhotoId(copy)).is_none());
+    assert!(s.catalog.photo(lightcraft_catalog::PhotoId(ids[1])).is_some());
+    assert!(s.undo.is_empty() && s.redo.is_empty());
+    assert_eq!(s.selection.active, None);
+    std::fs::remove_dir_all(src).unwrap();
+}
+
 /// Batch rename on disk: collisions with existing files and within the batch get suffixes, sidecars
 /// move along, virtual copies follow, undo/redo move the files back and forth, a failed move rolls
 /// the batch back, and the op log replays the new paths.

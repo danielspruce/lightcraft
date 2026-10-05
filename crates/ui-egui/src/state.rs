@@ -431,6 +431,9 @@ pub enum Dialog {
     ConfirmDelete {
         count: usize,
     },
+    ConfirmDeleteFromDisk {
+        ids: Vec<u64>,
+    },
     About,
     Shortcuts,
 }

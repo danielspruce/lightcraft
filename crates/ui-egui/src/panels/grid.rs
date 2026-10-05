@@ -696,7 +696,14 @@ pub fn context_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     });
     ui.separator();
     if ui.button("Delete Photo").clicked() {
-        let _ = app.run("photo.delete", json!({}));
+        if !crate::menus::confirm_delete(app) {
+            let _ = app.run("photo.delete", json!({}));
+        }
+        ui.close();
+    }
+    if ui.add_enabled(crate::menus::ui_enabled(app, "dialog.deleteFromDisk"), egui::Button::new("Delete from Disk…")).clicked() {
+        let _ = app.run("dialog.deleteFromDisk", json!({}));
+        ui.close();
     }
 }
 

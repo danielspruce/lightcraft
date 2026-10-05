@@ -55,6 +55,8 @@ Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **76.6%** of 500 in-sco
 
 ## Top gaps
 
+LR-LIB-DELETE: right-click → Delete from Disk… now confirms permanent original-file deletion. XMP sidecars are retained; select all virtual copies sharing a file. Automatic Recently Deleted purging remains open.
+
 Ordered by tier, then user value, then (low) effort. Take the first one nobody is working on.
 
 Auto quality (LR-EDIT-AUTO): selected photos can each receive independently calculated Auto settings in one undoable batch. RAW Auto now fits editable tone, colour and calibration controls against the embedded camera preview; exact matching of a separate edited JPEG and subject-aware finishing remain open quality gaps.
@@ -137,7 +139,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-LIB-PEOPLE | People / faces | P2 | ⬜ | | |
 | LR-LIB-STACK | Stacks | P1 | ✅ | `cmd:stack.group`, `cmd:stack.ungroup`, `cmd:stack.toggle`, `cmd:stack.setTop`, `cmd:stack.remove`, `cmd:stack.auto`, `crates/catalog/src/stacks.rs` | grid/filmstrip count badges, expand/collapse, auto-stack by capture time; no visual-similarity auto-stack |
 | LR-LIB-VERSIONS | Versions | P1 | ✅ | `cmd:version.create` | see section M |
-| LR-LIB-DELETE | Delete / Recently Deleted | P0 | ✅ | `cmd:photo.delete`, `cmd:photo.restore`, `cmd:photo.deletePermanently` | no confirmation dialog, no auto-purge after N days, no "Empty" |
+| LR-LIB-DELETE | Delete / Recently Deleted | P0 | ✅ | `cmd:photo.delete`, `cmd:photo.restore`, `cmd:photo.deletePermanently`, `cmd:photo.deleteFromDisk`, `cmd:dialog.deleteFromDisk` | right-click Delete from Disk always confirms irreversible original-file deletion and clearing undo history; preserves sidecars, protects unselected shared copies, reports file failures. Optional confirmation for Recently Deleted; no auto-purge after N days or "Empty" |
 | LR-LIB-REMOVE-ALBUM | Remove from album | P0 | ✅ | `cmd:album.removePhotos` | |
 | LR-LIB-DUPLICATE | Duplicate a photo | P2 | ✅ | `cmd:photo.duplicate` | Photo ▸ Duplicate: a real `-copy` file with the same settings, metadata and albums (virtual copies share the file) |
 | LR-LIB-RENAME | Batch rename | P1 | ✅ | `cmd:photo.rename`, `cmd:photo.renamePreview`, `cmd:dialog.rename`, `crates/engine/src/rename.rs` | template tokens {name} {seq:N} {date:%Y%m%d} {camera} {title}; preview; renames files on disk with their XMP sidecars, never overwriting (-1, -2… suffixes), rolls back on failure; undo/redo move the files; virtual copies follow |

@@ -178,6 +178,7 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "dialog.captureTime",
             "---",
             "photo.delete",
+            "dialog.deleteFromDisk",
         ],
     ),
     (

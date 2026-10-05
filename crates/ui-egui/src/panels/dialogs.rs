@@ -46,6 +46,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Merge { opts } => opts.title(),
         Dialog::Settings { .. } => "Settings",
         Dialog::ConfirmDelete { .. } => "Delete Photos",
+        Dialog::ConfirmDeleteFromDisk { .. } => "Delete from Disk",
         Dialog::About => "About LightCraft",
         Dialog::Shortcuts => "Keyboard Shortcuts",
     }
@@ -620,6 +621,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(format!("Move {what} to Recently Deleted?"));
                     ui.label(egui::RichText::new("They can be restored from Recently Deleted until it is emptied.").color(t.text_dim));
                 }
+                Dialog::ConfirmDeleteFromDisk { ids } => {
+                    ui.label(format!("Permanently delete {} selected photo(s) from disk?", ids.len()));
+                    ui.label("Original files and their library entries will be removed. XMP sidecars are kept.");
+                    ui.label("This cannot be undone and clears undo history. Files do not go to the Recycle Bin or Trash.");
+                }
                 Dialog::About => {
                     ui.label(egui::RichText::new("LightCraft").font(t.semibold(20.0)).color(t.text));
                     ui.label(format!("Version {} — a clean-room, pure-Rust photo library and raw developer.", env!("CARGO_PKG_VERSION")));
@@ -695,6 +701,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     Dialog::Merge { .. } => "Merge",
                     Dialog::ConfirmDelete { .. } => "Delete",
+                    Dialog::ConfirmDeleteFromDisk { .. } => "Delete from Disk",
                     _ if informational => "Close",
                     _ => "OK",
                 };
@@ -799,6 +806,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         Dialog::Merge { opts } => crate::merge::start_final(app, opts),
         Dialog::Import { opts } => crate::import::start(app, opts),
         Dialog::ConfirmDelete { .. } => app.run("photo.delete", json!({})),
+        Dialog::ConfirmDeleteFromDisk { ids } => app.run("photo.deleteFromDisk", json!({"ids": ids, "confirmed": true})),
         Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => Ok(serde_json::Value::Null),
     }
 }

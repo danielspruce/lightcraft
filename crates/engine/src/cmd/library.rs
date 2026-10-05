@@ -19,6 +19,58 @@ fn ids_param(p: &Value) -> Option<Vec<PhotoId>> {
     p.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(PhotoId).collect())
 }
 
+/// Disk deletion is irreversible. Validate the whole selection before touching any files,
+/// then remove catalog entries only for files successfully deleted.
+fn delete_from_disk(s: &mut Session, p: &Value) -> Result<Value> {
+    let command = "photo.deleteFromDisk";
+    if !bool_or(p, "confirmed", false) {
+        return Err(bad(command, "requires confirmed: true; permanently deletes originals and clears undo history"));
+    }
+    let ids = s.targets(p);
+    if ids.is_empty() {
+        return Err(bad(command, "no photos selected"));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for id in &ids {
+        let photo = s.catalog.photo(*id).ok_or_else(|| bad(command, "photo no longer exists"))?;
+        let lightcraft_catalog::Source::File { path } = &photo.source else {
+            return Err(bad(command, "selection contains a photo without a disk file"));
+        };
+        if s.catalog.photos().any(|other| other.source == photo.source && !ids.contains(&other.id)) {
+            return Err(bad(command, "select all virtual copies sharing the original before deleting it"));
+        }
+        paths.insert(path.clone());
+    }
+    let mut deleted = 0;
+    let mut errors = Vec::new();
+    for path in paths {
+        if let Err(e) = std::fs::remove_file(&path) {
+            errors.push(format!("{path}: {e}"));
+            continue;
+        }
+        for id in &ids {
+            if s.catalog.photo(*id).is_some_and(|photo| matches!(&photo.source, lightcraft_catalog::Source::File { path: source } if source == &path))
+            {
+                let op = s.catalog.delete_permanently_ops(*id);
+                s.commit("Delete from Disk", op)?;
+                deleted += 1;
+            }
+        }
+        // Older undo entries can also resurrect deleted photos or rename their files.
+        s.undo.clear();
+        s.redo.clear();
+        s.interaction = None;
+    }
+    s.selection.ids.retain(|id| s.catalog.photo(*id).is_some());
+    if s.selection.active.is_some_and(|id| s.catalog.photo(id).is_none()) {
+        s.selection.active = s.selection.ids.first().copied();
+    }
+    if !errors.is_empty() {
+        return Err(bad(command, format!("Deleted {deleted} photos; could not delete: {}", errors.join("; "))));
+    }
+    Ok(json!({"deleted": deleted}))
+}
+
 /// Apply one op per target as a single undo step.
 fn for_targets(s: &mut Session, p: &Value, label: &str, f: impl Fn(PhotoId) -> Option<Op>) -> Result<Value> {
     let targets = s.targets(p);
@@ -347,6 +399,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("photo.flipHorizontal", "Flip Horizontal", ["Photo"], None, "{ids?}", has_selection, |s, p| flip(s, p, true)),
         cmd!("photo.flipVertical", "Flip Vertical", ["Photo"], None, "{ids?}", has_selection, |s, p| flip(s, p, false)),
         // ---- delete / restore
+        cmd!(
+            "photo.deleteFromDisk",
+            "Delete from Disk",
+            [],
+            None,
+            "{ids?, confirmed: true} — permanently deletes original files; leaves sidecars; clears undo history",
+            has_selection,
+            delete_from_disk
+        ),
         cmd!("photo.delete", "Delete Photo", ["Photo"], Some("Delete"), "{ids?} — moves to Recently Deleted", has_selection, |s, p| {
             let v = for_targets(s, p, "Delete", |id| Some(Op::SetDeleted { id, deleted: true }))?;
             let vis = s.visible_cloned();
