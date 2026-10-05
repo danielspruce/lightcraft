@@ -47,6 +47,7 @@ pub fn language_from_command(id: &str) -> Option<crate::i18n::Locale> {
 }
 
 pub const UI_COMMANDS: &[UiCommand] = &[
+    ("dialog.deleteFromDisk", "Delete from Disk…", None, "Photo"),
     ("view.photoGrid", "Photo Grid", None, "View"),
     ("view.squareGrid", "Square Grid", None, "View"),
     // G: Photo Grid ↔ Square Grid (from other views: the photo grid)
@@ -870,6 +871,14 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::Rename { template, start: p.get("start").and_then(Value::as_u64).unwrap_or(1) as u32 });
             Ok(Value::Null)
         }
+        "dialog.deleteFromDisk" => {
+            if !ui_enabled(app, id) {
+                return Some(Err("Select photos with files on disk first".into()));
+            }
+            let ids = app.session.targets(&json!({})).iter().map(|id| id.0).collect();
+            app.ui.dialog = Some(Dialog::ConfirmDeleteFromDisk { ids });
+            Ok(Value::Null)
+        }
         "dialog.createPreset" => {
             app.ui.dialog = Some(Dialog::create_preset());
             Ok(Value::Null)
@@ -1404,6 +1413,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
 
 pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
     match id {
+        "dialog.deleteFromDisk" => {
+            let ids = app.session.targets(&json!({}));
+            !ids.is_empty()
+                && ids
+                    .iter()
+                    .all(|id| app.session.catalog.photo(*id).is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. })))
+        }
         s if s.starts_with("panel.") || s.starts_with("tool.") || s.starts_with("section.") => app.session.active().is_some() || s == "panel.close",
         "app.export" | "dialog.export" | "dialog.createPreset" | "dialog.rename" | "dialog.captureTime" | "dialog.copySettings" => {
             app.session.active().is_some()

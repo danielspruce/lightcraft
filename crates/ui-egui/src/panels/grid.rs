@@ -961,12 +961,24 @@ pub fn context_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if crate::menubar::selection_deleted(app) {
         if ui.button(crate::i18n::tr("Restore")).clicked() {
             let _ = app.run("photo.restore", json!({}));
+            ui.close();
         }
         if ui.button(crate::i18n::tr("Delete Permanently")).clicked() {
             let _ = app.run("photo.deletePermanently", json!({}));
+            ui.close();
         }
-    } else if ui.button(crate::i18n::tr("Delete Photo")).clicked() {
-        let _ = app.run("photo.delete", json!({}));
+    } else {
+        if ui.button(crate::i18n::tr("Delete Photo")).clicked() {
+            if !crate::menus::confirm_delete(app) {
+                let _ = app.run("photo.delete", json!({}));
+            }
+            ui.close();
+        }
+        if ui.add_enabled(crate::menus::ui_enabled(app, "dialog.deleteFromDisk"), egui::Button::new("Delete from Disk…")).clicked() {
+            let _ = app.run("dialog.deleteFromDisk", json!({}));
+            ui.close();
+        }
+    }
     }
 }
 

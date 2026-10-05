@@ -596,6 +596,9 @@ pub enum Dialog {
     ConfirmDelete {
         count: usize,
     },
+    ConfirmDeleteFromDisk {
+        ids: Vec<u64>,
+    },
     /// Confirm taking a folder's photos out of the library (`library.removeFolder`).
     RemoveFolder {
         path: String,

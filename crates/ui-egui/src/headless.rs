@@ -656,6 +656,26 @@ mod tests {
         h.settle(SETTLE);
     }
 
+    #[test]
+    fn delete_from_disk_dialog_captures_selection_and_cancels() {
+        let mut h = demo([1200.0, 800.0]);
+        let t = Duration::from_secs(10);
+        let ids = h.app.session.visible_cloned();
+        let mut photo = (**h.app.session.catalog.photo(ids[0]).unwrap()).clone();
+        photo.source = lightcraft_catalog::Source::File { path: "missing-test-original.png".into() };
+        h.app.session.catalog.apply(lightcraft_catalog::Op::RemovePhoto { id: ids[0] }).unwrap();
+        h.app.session.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        h.app.run("library.select", json!({"ids": [ids[0].0]})).unwrap();
+        h.app.run("dialog.deleteFromDisk", json!({})).unwrap();
+        h.app.run("library.select", json!({"ids": [ids[1].0]})).unwrap();
+        assert_eq!(h.app.ui.dialog, Some(crate::state::Dialog::ConfirmDeleteFromDisk { ids: vec![ids[0].0] }));
+        h.step();
+        let r = h.request("ui.dialog.cancel", json!({}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(h.app.ui.dialog.is_none());
+        assert!(h.app.session.catalog.photo(ids[0]).is_some());
+    }
+
     /// The Export dialog hands its batch to a worker thread: the UI keeps drawing frames, shows
     /// progress, and reports the result when the files are written.
     #[test]

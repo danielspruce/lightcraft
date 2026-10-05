@@ -196,6 +196,7 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "photo.tagFromTracklog",
             "---",
             "photo.delete",
+            "dialog.deleteFromDisk",
             "photo.restore",
             "photo.deletePermanently",
         ],
