@@ -49,8 +49,8 @@ const REL_TEMP: ControlSpec = ControlSpec {
     min: -100.0,
     max: 100.0,
     default: 0.0,
-    step: 1.0,
-    decimals: 0,
+    step: 0.1,
+    decimals: 1,
     track: Track::Temp,
 };
 const REL_TINT: ControlSpec = ControlSpec {
@@ -119,8 +119,21 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
     }
     let n = app.session.selection.ids.len();
-    if n > 1 && matches!(app.ui.view, crate::state::ViewMode::PhotoGrid | crate::state::ViewMode::SquareGrid) {
-        quick_develop(app, ui, n);
+    if n > 1 {
+        if matches!(app.ui.view, crate::state::ViewMode::PhotoGrid | crate::state::ViewMode::SquareGrid) {
+            quick_develop(app, ui, n);
+        } else {
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
+                if text_button(ui, "autoSelected", &format!("Auto All {n} Selected Photos"), false)
+                    .on_hover_text("Calculate Auto separately for every selected photo. Undo reverts the entire batch.")
+                    .clicked()
+                    && app.run("develop.autoSelected", json!({})).is_ok()
+                {
+                    app.toast(ui.ctx(), &format!("Auto settings applied to {n} photos"));
+                }
+            });
+        }
+
     }
     if app.session.auto_sync && n > 1 {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {

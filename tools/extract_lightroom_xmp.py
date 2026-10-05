@@ -23,6 +23,10 @@ import zlib
 from pathlib import Path, PureWindowsPath
 
 CRS_NS = b"http://ns.adobe.com/camera-raw-settings/1.0/"
+RAW_EXTENSIONS = frozenset(
+    "3fr arw bay cap cr2 cr3 crw dcr dng erf fff iiq k25 kdc mef mos mrw "
+    "nef nrw orf pef ptx pxn r3d raf raw rw2 rwl sr2 srf srw x3f".split()
+)
 
 
 class CatalogError(Exception):
@@ -107,7 +111,15 @@ def records(db: sqlite3.Connection):
         LEFT JOIN AgLibraryRootFolder AS ro ON ro.id_local=fo.rootFolder
         WHERE x.xmp IS NOT NULL {master_filter}
     """
-    yield from db.execute(sql)
+    # RAW/JPEG pairs share a stem sidecar. Select the raw packet before any
+    # rendered counterpart, regardless of the database's insertion order.
+    yield from sorted(
+        db.execute(sql),
+        key=lambda row: (
+            (row[2] or "").lstrip(".").casefold() not in RAW_EXTENSIONS,
+            row[0],
+        ),
+    )
 
 
 def source_path(base: str, extension: str, folder: str, root: str) -> Path | None:
@@ -226,22 +238,20 @@ def build_search_index(
     return index
 
 
-def find_unique_file(
+def find_matching_files(
     index: dict[tuple[str, int], list[Path]],
     names: list[str],
     size: int | None,
-) -> tuple[Path | None, bool]:
+) -> list[Path]:
     if size is None:
-        return None, False
+        return []
     matches: dict[str, Path] = {}
     for name in names:
         if name:
             basename = name.replace("\\", "/").rsplit("/", 1)[-1]
             for path in index.get((basename.casefold(), size), []):
                 matches.setdefault(os.path.normcase(str(path)), path)
-    if len(matches) == 1:
-        return next(iter(matches.values())), False
-    return None, len(matches) > 1
+    return sorted(matches.values(), key=lambda path: os.path.normcase(str(path)))
 
 
 def exclusive_write(path: Path, data: bytes) -> str:
@@ -316,6 +326,7 @@ def run(args: argparse.Namespace) -> int:
     db.execute("PRAGMA query_only=ON")
     summary = {"packets": 0, "with_crs": 0, "written": 0, "unchanged": 0, "conflict": 0, "unwritable": 0, "missing_photo": 0, "photos_found": 0, "relocated": 0, "ambiguous": 0, "bad_packet": 0, "duplicates": 0}
     seen_sources: set[str] = set()
+    seen_destinations: set[str] = set()
     manifest_rows: list[tuple[str, str, str, str]] = []
     unwritable_paths: list[str] = []
     rows_seen = 0
@@ -345,69 +356,75 @@ def run(args: argparse.Namespace) -> int:
         summary["with_crs"] += 1
         resolved_root = mapped_root(root or "", mappings)
         source = source_path(base or "", extension or "", folder or "", resolved_root)
-        key = os.path.normcase(str(source)) if source else ""
         source_exists = args.in_place and source is not None and source.is_file()
+        sources = [source]
         if args.in_place and not source_exists and search_index:
             catalog_name = f"{base}.{extension.lstrip('.')}" if extension else (base or "")
-            candidate, ambiguous = find_unique_file(
+            candidates = find_matching_files(
                 search_index,
                 [original_filename or "", catalog_name],
                 indexed_file_size(import_hash),
             )
-            if candidate is not None:
-                source = candidate
-                key = os.path.normcase(str(source))
+            if candidates:
+                sources = candidates
                 source_exists = True
                 summary["relocated"] += 1
-            elif ambiguous:
-                summary["ambiguous"] += 1
-        if source_exists:
-            summary["photos_found"] += 1
-        if args.in_place and not source_exists:
-            summary["missing_photo"] += 1
-            action = "missing-photo"
-            dest = None
-        elif args.in_place and key in seen_sources:
-            summary["duplicates"] += 1
-            action = "duplicate-source-path"
-            dest = None
-        else:
-            if key:
-                seen_sources.add(key)
-            dest, existing_checks = xmp_destinations(
-                source=source,
-                root=resolved_root,
-                root_name=root_name or "",
-                root_id=root_id,
-                folder=folder or "",
-                base=base or "",
-                output_dir=output_dir,
-                in_place=args.in_place,
-            )
-            if args.in_place:
-                already = [p for p in existing_checks if p.exists()]
-                if already:
-                    action = "unchanged" if any(p.is_file() and p.read_bytes() == packet for p in already) else "conflict"
+                if len(candidates) > 1:
+                    summary["ambiguous"] += 1
+        for source in sources:
+            key = os.path.normcase(str(source)) if source else ""
+            if source_exists:
+                summary["photos_found"] += 1
+            if args.in_place and not source_exists:
+                summary["missing_photo"] += 1
+                action = "missing-photo"
+                dest = None
+            elif args.in_place and key in seen_sources:
+                summary["duplicates"] += 1
+                action = "duplicate-source-path"
+                dest = None
+            else:
+                if key:
+                    seen_sources.add(key)
+                dest, existing_checks = xmp_destinations(
+                    source=source,
+                    root=resolved_root,
+                    root_name=root_name or "",
+                    root_id=root_id,
+                    folder=folder or "",
+                    base=base or "",
+                    output_dir=output_dir,
+                    in_place=args.in_place,
+                )
+                destination_key = os.path.normcase(str(dest))
+                if destination_key in seen_destinations:
+                    summary["duplicates"] += 1
+                    action = "duplicate-sidecar-path"
+                elif args.in_place:
+                    already = [p for p in existing_checks if p.exists()]
+                    if already:
+                        action = "unchanged" if any(p.is_file() and p.read_bytes() == packet for p in already) else "conflict"
+                    elif args.write:
+                        action = write_destination(dest, packet)
+                    else:
+                        action = "would-write"
                 elif args.write:
                     action = write_destination(dest, packet)
                 else:
                     action = "would-write"
-            elif args.write:
-                action = write_destination(dest, packet)
-            else:
-                action = "would-write"
+                seen_destinations.add(destination_key)
 
-        if action in summary:
-            summary[action] += 1
-            if action == "unwritable" and dest is not None and len(unwritable_paths) < 10:
-                unwritable_paths.append(str(dest))
-        elif action == "would-write":
-            summary["written"] += 1
-        elif action == "unchanged":
-            summary["unchanged"] += 1
-        elif action == "conflict":
-            summary["conflict"] += 1
-        manifest_rows.append((str(image_id), str(source or ""), str(dest or ""), action))
+            if action in summary:
+                summary[action] += 1
+                if action == "unwritable" and dest is not None and len(unwritable_paths) < 10:
+                    unwritable_paths.append(str(dest))
+            elif action == "would-write":
+                summary["written"] += 1
+            elif action == "unchanged":
+                summary["unchanged"] += 1
+            elif action == "conflict":
+                summary["conflict"] += 1
+            manifest_rows.append((str(image_id), str(source or ""), str(dest or ""), action))
 
     db.close()
     if args.write and output_dir is not None:
@@ -424,13 +441,13 @@ def run(args: argparse.Namespace) -> int:
         print(f"Unreadable XMP packets skipped: {summary['bad_packet']}")
     if args.in_place:
         print(f"Sidecars written: {summary['written']}; already present: {summary['unchanged']}; conflicts: {summary['conflict']}; unwritable: {summary['unwritable']}")
-        print(f"Photos unavailable at catalog paths: {summary['missing_photo']}; duplicate catalog paths skipped: {summary['duplicates']}")
+        print(f"Photos unavailable at catalog paths: {summary['missing_photo']}; duplicate source/sidecar paths skipped: {summary['duplicates']}")
         for path in unwritable_paths:
             print(f"Unwritable sidecar: {path}")
         if args.search_under:
-            print(f"Photos relocated by unique filename and size: {summary['relocated']}; ambiguous matches skipped: {summary['ambiguous']}")
+            print(f"Catalog records relocated by filename and size: {summary['relocated']}; records with multiple matching copies: {summary['ambiguous']}")
     else:
-        print(f"Sidecars {'written' if args.write else 'that would be written'}: {summary['written']}; conflicts: {summary['conflict']}")
+        print(f"Sidecars {'written' if args.write else 'that would be written'}: {summary['written']}; conflicts: {summary['conflict']}; duplicates skipped: {summary['duplicates']}")
         if args.write:
             print(f"Output tree and manifest: {output_dir}")
     if args.limit is not None:
@@ -460,7 +477,7 @@ def main() -> int:
         type=Path,
         default=[],
         metavar="DIR",
-        help="search this photo tree for missing files with a unique catalog filename and file size; repeat as needed",
+        help="search this photo tree for missing files matching catalog filename and file size; write beside every matching copy; repeat as needed",
     )
     parser.add_argument("--limit", type=int, help="process at most N XMP packets; intended for dry runs")
     args = parser.parse_args()

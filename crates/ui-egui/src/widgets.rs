@@ -239,10 +239,15 @@ pub fn slider(ui: &mut Ui, spec: &ControlSpec, value: f64, enabled: bool, label_
             && let Some(p) = resp.interact_pointer_pos()
         {
             let fine = ui.input(|i| i.modifiers.shift);
-            let nv = if fine {
+            let nv = if fine || matches!(spec.id, "wb.temp" | "wb.tempRel") {
                 let dx = ui.input(|i| i.pointer.delta().x);
-                value + dx as f64 * span / track_rect.width() as f64 * 0.1
+                let accumulator_id = id.with("drag_value");
+                let previous = if resp.drag_started() { value } else { ui.data(|d| d.get_temp::<f64>(accumulator_id)).unwrap_or(value) };
+                let next = drag_value(spec, previous, dx as f64, track_rect.width() as f64, fine);
+                ui.data_mut(|d| d.insert_temp(accumulator_id, next));
+                next
             } else {
+                ui.data_mut(|d| d.remove::<f64>(id.with("drag_value")));
                 from_x(p.x)
             };
             let step = spec.step.max(1e-9);
@@ -263,6 +268,7 @@ pub fn slider(ui: &mut Ui, spec: &ControlSpec, value: f64, enabled: bool, label_
         }
         if resp.drag_stopped() {
             out.drag_stopped = true;
+            ui.data_mut(|d| d.remove::<f64>(id.with("drag_value")));
         }
         // ↑ / ↓ while the pointer rests on the row nudge the value (⇧: five times as much)
         if enabled && out.value.is_none() && typing.is_none() && ui.rect_contains_pointer(row) {
@@ -309,7 +315,18 @@ pub fn slider(ui: &mut Ui, spec: &ControlSpec, value: f64, enabled: bool, label_
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
+    resp.on_hover_text("Drag to adjust; hold Shift for extra precision. Click the track for larger changes.");
     out
+}
+
+/// Accumulate fractional motion before rounding, including slow fine drags.
+fn drag_value(spec: &ControlSpec, value: f64, dx: f64, width: f64, fine: bool) -> f64 {
+    let rate = match spec.id {
+        "wb.temp" => 10.0,
+        "wb.tempRel" => 0.1,
+        _ => (spec.max - spec.min) / width.max(1.0),
+    };
+    (value + dx * rate * if fine { 0.1 } else { 1.0 }).clamp(spec.min, spec.max)
 }
 
 /// `value` moved by `steps` keyboard nudges: one nudge is about 1/200 of the range, a whole
@@ -518,6 +535,22 @@ pub fn dropdown(ui: &mut Ui, id: &str, text: &str, font: egui::FontId, color: Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temperature_drags_preserve_micro_adjustments() {
+        let spec = lightcraft_develop::controls::find("wb.temp").unwrap();
+        assert_eq!(drag_value(spec, 6500.0, 1.0, 240.0, false), 6510.0);
+        assert_eq!(drag_value(spec, 6500.0, 1.0, 240.0, true), 6501.0);
+        assert_eq!(spec.step, 1.0);
+        let relative = ControlSpec { id: "wb.tempRel", min: -100.0, max: 100.0, step: 0.1, ..spec.clone() };
+        let mut value = 0.0;
+        for _ in 0..10 {
+            value = drag_value(&relative, value, 1.0, 240.0, true);
+        }
+        assert!((value - 0.1).abs() < 1e-9);
+        assert_eq!(drag_value(spec, spec.max, 10.0, 240.0, true), spec.max);
+        assert_eq!(drag_value(spec, spec.min, -10.0, 240.0, true), spec.min);
+    }
 
     #[test]
     fn nudges_are_a_sensible_step() {

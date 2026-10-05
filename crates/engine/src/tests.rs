@@ -49,6 +49,38 @@ fn demo_library_loads() {
 }
 
 #[test]
+fn auto_selected_calculates_each_photo_and_undoes_as_one_batch() {
+    let mut s = demo();
+    let ids = s.visible()[..3].to_vec();
+    let before: Vec<_> = ids.iter().map(|&id| s.develop_of(id).unwrap()).collect();
+    let mut expected = Vec::new();
+    for &id in &ids[..2] {
+        s.execute("library.select", &json!({"ids": [id.0]})).unwrap();
+        s.execute("develop.auto", &json!({})).unwrap();
+        expected.push(s.develop_of(id).unwrap());
+        s.execute("edit.undo", &json!({})).unwrap();
+    }
+    assert_ne!(expected[0], expected[1], "fixtures must require different Auto settings");
+    s.execute("library.select", &json!({"ids": [ids[0].0, ids[1].0]})).unwrap();
+    s.auto_sync = true;
+    let active = s.active();
+    let undo = s.undo.len();
+    assert_eq!(s.execute("develop.autoSelected", &json!({})).unwrap()["count"], 2);
+    assert_eq!(s.undo.len(), undo + 1);
+    assert_eq!(s.active(), active);
+    for (i, &id) in ids[..2].iter().enumerate() {
+        assert_eq!(s.develop_of(id).unwrap(), expected[i]);
+    }
+    assert_eq!(s.develop_of(ids[2]).unwrap(), before[2]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        assert_eq!(s.develop_of(id).unwrap(), before[i]);
+    }
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.develop_of(ids[1]).unwrap(), expected[1]);
+}
+
+#[test]
 fn auto_uses_raw_preview_and_undo_restores_all_settings() {
     use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
     use lightcraft_pipeline::{RenderRequest, SourceInfo};

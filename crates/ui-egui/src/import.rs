@@ -731,13 +731,19 @@ fn finish(app: &mut LightcraftApp, ctx: &egui::Context, task: ImportTask) {
         }
         return;
     }
+    let task = app.import.take().expect("import task");
+    let steps = app.session.undo.len().saturating_sub(task.undo0);
+    let label = format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
+    app.session.merge_undo(steps, &label);
     if task.browse {
         if task.failed > 0 {
             app.toast(ctx, crate::i18n::tr_format!("{} photo{} not readable", task.failed, if task.failed == 1 { "" } else { "s" }));
         }
         return;
     }
-    if task.keep_selection.is_none() && let Some(f) = task.first {
+    if !task.preserve_selection
+        && let Some(f) = task.first
+
         let _ = app.run("library.select", json!({"ids": [f]}));
     }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
