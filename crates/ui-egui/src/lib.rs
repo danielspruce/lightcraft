@@ -177,11 +177,6 @@ pub struct LightcraftApp {
     pub merge: merge::MergeState,
     /// An import in progress (the import review dialog's batches).
     pub import: Option<import::ImportTask>,
-    pub merge: merge::MergeState,
-    /// An import in progress (the import review dialog's batches).
-    pub import: Option<import::ImportTask>,
-    /// A folder import preview being scanned off the UI thread.
-    pub import_scan: Option<import::ImportScanTask>,
     /// A folder scan in progress (feeds the import review).
     pub scan: Option<import::ScanTask>,
     /// A background export in progress.
@@ -239,9 +234,6 @@ impl LightcraftApp {
             loupe_shown: None,
             merge: merge::MergeState::default(),
             import: None,
-            merge: merge::MergeState::default(),
-            import: None,
-            import_scan: None,
             scan: None,
             export: None,
             tasks: Default::default(),

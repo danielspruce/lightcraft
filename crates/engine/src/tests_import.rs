@@ -28,6 +28,61 @@ fn ids(v: &Value, key: &str) -> usize {
 }
 
 #[test]
+fn import_auto_option_reaches_shared_parser_and_is_one_undo_step() {
+    let src = temp_dir("auto-merge");
+    write_png(&src.join("one.png"), 4);
+    let mut s = Session::new().with_fs();
+    let params = json!({"paths": [src.to_string_lossy()], "autoWithoutXmp": true});
+    assert!(crate::cmd::library::import_params(&s, &params).unwrap().opts.auto_without_xmp);
+    let result = s.execute("library.import", &params).unwrap();
+    assert_eq!(ids(&result, "imported"), 1);
+    let photo = s.catalog.photos().next().unwrap();
+    assert!(photo.history.iter().any(|step| step.label.contains("Auto")), "Auto must reach worker-prepared imports");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.catalog.len(), 0);
+    let _ = std::fs::remove_dir_all(src);
+}
+
+#[test]
+fn auto_import_leaves_existing_xmp_edits_intact() {
+    let src = temp_dir("auto-xmp-merge");
+    write_png(&src.join("one.png"), 4);
+    std::fs::write(src.join("one.xmp"), r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="1.25"/></rdf:RDF></x:xmpmeta>"#).unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "autoWithoutXmp": true})).unwrap();
+    let photo = s.catalog.photos().next().unwrap();
+    assert_eq!(photo.develop.light.exposure, 1.25);
+    assert!(!photo.history.iter().any(|step| step.label.contains("Auto")));
+    let _ = std::fs::remove_dir_all(src);
+}
+
+#[test]
+fn worker_scan_reports_recent_paths_and_reuses_probes() {
+    let src = temp_dir("scan-merge");
+    for seed in 0..5 {
+        write_png(&src.join(format!("{seed}.png")), seed);
+    }
+    let mut s = Session::new().with_fs();
+    let (input, paths) = crate::import::ScanInput::new(&mut s, &[src.to_string_lossy().into_owned()]);
+    let progress = crate::import::ScanProgress::default();
+    let output = crate::import::scan_with(input, &paths, &progress);
+    assert_eq!(output.candidates.len(), 5);
+    assert_eq!(output.probes.len(), 5);
+    assert_eq!(progress.found.load(std::sync::atomic::Ordering::Relaxed), 5);
+    assert_eq!(progress.done.load(std::sync::atomic::Ordering::Relaxed), 5);
+    let details = progress.details.lock().unwrap();
+    assert_eq!(details.phase, "Checking photos");
+    assert_eq!(details.recent_paths.len(), 3);
+    drop(details);
+    s.import_probes = output.probes;
+    let (input, paths) = crate::import::ScanInput::new(&mut s, &paths);
+    let output = crate::import::scan_with(input, &paths, &crate::import::ScanProgress::default());
+    assert_eq!(output.candidates.len(), 5);
+    assert!(output.candidates.iter().all(|c| c.error.is_none()));
+    let _ = std::fs::remove_dir_all(src);
+}
+
+#[test]
 fn recursive_import_with_duplicates() {
     let src = temp_dir("src");
     write_png(&src.join("a.png"), 1);
@@ -161,9 +216,9 @@ fn renamed_and_ambiguous_scene(tag: &str) -> (std::path::PathBuf, Session) {
         b[k] ^= 0xff;
         std::fs::write(dst, b).unwrap();
     };
-    std::fs::rename(dir.join("old/a.png"), dir.join("moved/Trip-001.png")).unwrap();
+    std::fs::rename(dir.join("old/a.png"), dir.join("moved").join("Trip-001.png")).unwrap();
     impostor(&dir.join("old/b.png"), &dir.join("moved/b.png"));
-    std::fs::rename(dir.join("old/b.png"), dir.join("moved/real/Trip-002.png")).unwrap();
+    std::fs::rename(dir.join("old/b.png"), dir.join("moved").join("real").join("Trip-002.png")).unwrap();
     impostor(&dir.join("old/c.png"), &dir.join("moved/c.png"));
     impostor(&dir.join("old/c.png"), &dir.join("moved/real/c.png"));
     std::fs::remove_file(dir.join("old/c.png")).unwrap();
@@ -181,8 +236,12 @@ fn find_missing_matches_renamed_files_by_content() {
     let to = |name: &str| {
         found.iter().find(|f| f["from"].as_str().unwrap().ends_with(name)).map(|f| (f["to"].as_str().unwrap().to_string(), f["by"].clone()))
     };
-    assert_eq!(to("a.png"), Some((dir.join("moved/Trip-001.png").to_string_lossy().to_string(), json!("content"))));
-    assert_eq!(to("b.png"), Some((dir.join("moved/real/Trip-002.png").to_string_lossy().to_string(), json!("content"))), "not the impostor");
+    assert_eq!(to("a.png"), Some((dir.join("moved").join("Trip-001.png").to_string_lossy().to_string(), json!("content"))));
+    assert_eq!(
+        to("b.png"),
+        Some((dir.join("moved").join("real").join("Trip-002.png").to_string_lossy().to_string(), json!("content"))),
+        "not the impostor"
+    );
     assert_eq!(r["missing"], 1);
     assert_eq!(r["ambiguous"][0]["candidates"].as_array().map(Vec::len), Some(2), "{r}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -582,7 +641,7 @@ fn folders_rename_and_move_with_their_photos() {
     assert!(s.execute("folder.move", &json!({"path": b.to_string_lossy(), "into": b.join("deeper").to_string_lossy()})).is_err(), "not into itself");
     let r = s.execute("folder.move", &json!({"path": b.to_string_lossy(), "into": root.join("Archive").to_string_lossy()})).unwrap();
     assert_eq!(r["relinked"], 1);
-    assert_eq!(path(&s), root.join("Archive/Italy 2026/one.png").to_string_lossy());
+    assert_eq!(path(&s), root.join("Archive").join("Italy 2026").join("one.png").to_string_lossy());
     let _ = std::fs::remove_dir_all(&root);
 }
 

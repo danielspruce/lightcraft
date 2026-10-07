@@ -395,7 +395,11 @@ impl MoveFs for RealFs {
 /// `from` → `to` differs only in letter case and `to` is that very file (a case-insensitive
 /// volume): the rename must go through a temporary name.
 fn is_respelling(fs: &dyn MoveFs, from: &Path, to: &Path) -> bool {
-    from != to && from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase() && fs.exists(to) && fs.same_file(from, to)
+    from != to && lowercase_path(from) == lowercase_path(to) && fs.exists(to) && fs.same_file(from, to)
+}
+
+fn lowercase_path(path: &Path) -> String {
+    path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>().join("/")
 }
 
 /// Rename `a` to `b` without ever replacing a file; a change of letter case only goes through a
@@ -590,11 +594,11 @@ fn plan_rename_core(
                 loop {
                     let name = candidate(k);
                     let tp = dir.join(&name).to_string_lossy().to_string();
-                    let key = tp.to_lowercase();
+                    let key = lowercase_path(Path::new(&tp));
                     // this very file, maybe spelled differently (case-insensitive volume)? By
                     // identity: on a case-sensitive volume `img_1.jpg` may be another photo
                     let (from, to) = (Path::new(path), Path::new(&tp));
-                    let same = tp == *path || (from != to && key == path.to_lowercase() && exists(to) && same_file(from, to));
+                    let same = from == to || (from != to && key == lowercase_path(from) && exists(to) && same_file(from, to));
                     // free: not claimed in this batch and not on disk (unless it is this very file).
                     // A file this batch moves away still counts as taken: simple and safe.
                     if !taken.contains(&key) && (same || !exists(to)) {
@@ -769,7 +773,7 @@ mod tests {
             }
         }
         fn idx(&self, p: &Path) -> Option<usize> {
-            let p = p.to_string_lossy();
+            let p = p.to_string_lossy().replace('\\', "/");
             self.files.borrow().iter().position(|(f, _)| if self.ci { f.to_lowercase() == p.to_lowercase() } else { *f == p })
         }
         /// The listing: (exact path, contents), sorted.
@@ -798,7 +802,7 @@ mod tests {
                 return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"));
             }
             let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
-            self.files.borrow_mut()[i].0 = b.to_string_lossy().to_string();
+            self.files.borrow_mut()[i].0 = b.to_string_lossy().replace('\\', "/");
             Ok(())
         }
         fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
@@ -807,7 +811,7 @@ mod tests {
             }
             let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
             let c = self.files.borrow()[i].1.clone();
-            self.files.borrow_mut().push((b.to_string_lossy().to_string(), c));
+            self.files.borrow_mut().push((b.to_string_lossy().replace('\\', "/"), c));
             Ok(())
         }
         fn remove_file(&self, p: &Path) -> std::io::Result<()> {
@@ -884,7 +888,7 @@ mod tests {
         let plans = s.plan_rename_with(&fs, &ids, "Trip-{seq}", 1);
         // c can't be renamed (the share went away), and neither can Trip-1 be moved back
         fs.fail.borrow_mut().extend(["c.jpg".to_string(), "Trip-1".to_string()]);
-        let err = s.apply_rename_with(&fs, &plans).unwrap_err().to_string();
+        let err = s.apply_rename_with(&fs, &plans).unwrap_err().to_string().replace('\\', "/");
         assert!(err.contains("rename /p/c.jpg"), "{err}");
         assert!(err.contains("/p/Trip-1.jpg could not be moved back"), "{err}");
         assert!(err.contains("/p/a.jpg → /p/Trip-1.jpg"), "lists what stayed renamed: {err}");
@@ -899,7 +903,7 @@ mod tests {
         );
         // the catalog matches the disk
         let path = |s: &Session, id: u64| match &s.catalog.photo(PhotoId(id)).unwrap().source {
-            Source::File { path } => path.clone(),
+            Source::File { path } => path.replace('\\', "/"),
             Source::Demo { .. } => String::new(),
         };
         assert_eq!(path(&s, 1), "/p/Trip-1.jpg");

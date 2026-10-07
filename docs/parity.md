@@ -44,16 +44,14 @@ and prints the summary; `cargo xtask parity --write` refreshes the summary table
 | U. Map & location (MAP) | 0 | 1 | 1 | 0 | — | 0/1 (0%) |
 | V. Preferences (PREF) | 5 | 0 | 3 | 3 | 1/1 (100%) | 4/4 (100%) |
 | W. Cloud & AI infrastructure (CLOUD / AI) | 1 | 0 | 1 | 2 | — | — |
-| X. Cross-cutting behaviours (BEHAV) | 15 | 3 | 2 | 1 | 8/8 (100%) | 6/8 (75%) |
+| X. Cross-cutting behaviours (BEHAV) | 15 | 4 | 1 | 1 | 8/8 (100%) | 6/8 (75%) |
 | Y. Menus | 81 | 0 | 4 | 8 | 47/47 (100%) | 23/23 (100%) |
 | Z. Keyboard shortcuts (desktop) | 74 | 3 | 3 | 1 | 49/52 (94%) | 22/23 (96%) |
 | Lightroom Classic extras | 31 | 9 | 40 | 9 | — | 21/22 (95%) |
-| **Total** | 387 | 29 | 91 | 37 | 194/200 (97%) | 139/149 (93%) |
+| **Total** | 387 | 30 | 90 | 37 | 194/200 (97%) | 139/149 (93%) |
 
-Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.2%** of 507 in-scope rows — P0 98.5% of 200 · P1 95.6% of 149 · P2 39.2% of 158.
+Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.3%** of 507 in-scope rows — P0 98.5% of 200 · P1 95.6% of 149 · P2 39.6% of 158.
 <!-- /parity:summary -->
-
-## Top gaps
 
 ## Top gaps
 
@@ -69,7 +67,7 @@ Take the first one nobody is working on.
 1. **LR-PROF-CAMERACOLOR** (P0): our own camera colour calibration. Sony ARW now gets a guarded file-local fit to its own embedded JPEG (colour matrix + tone curve, relative WB; 7 of 10 public samples accepted, mean ΔE vs the camera JPEG 17–26 → 3–10); measured calibration and fidelity remain missing. Other non-DNG raws and rejected fits still use a neutral matrix. Expand validated preview fitting and use matrices the files carry themselves; never Adobe data.
 2. **LR-IMP-FORMATS** (P0): **CR3** first (every Canon body since ~2018), then compressed RAF / ORF, RW2 v4, Nikon "lossy after split" NEF, Canon sRAW; HEIC/AVIF decode. Clean-room, from prose descriptions only (see `crates/raw/src/vendor/nefc.rs` for how compressed NEF was done). Until decoded, such photos are `preview_only`.
 3. **LR-IMP-CAMERA-COVERAGE** (P0): per-model verification; grow the CC0 corpus and fix per-model bugs (like the CR2 colour-filter layout, fixed in #85 by reading the file's own tag).
-4. **LR-BEHAV-RENDER-FIDELITY** (P1): a side-by-side fidelity suite against Lightroom renders (kept local in `plan/`), then tune tone, highlights, texture/clarity/dehaze, NR and sharpening against it.
+4. **LR-BEHAV-RENDER-FIDELITY** (P1): CPU/GPU warped borders now share an antialiased edge transition (DX12 lens/perspective comparison max difference 1 LSB). Still needs a side-by-side fidelity suite against Lightroom renders (kept local in `plan/`), then tune tone, highlights, texture/clarity/dehaze, NR and sharpening against it.
 5. **LR-EDIT-OPTICS-PROFILE** (P1): a lens-profile database of our own (embedded DNG/maker corrections work today).
 6. **AI masks and Enhance** (LR-MASK-SUBJECT / SKY / PEOPLE / OBJECTS, LR-EDIT-DETAIL-DENOISE, SUPERRES, LENSBLUR): blocked on a model strategy (permissively licensed weights or our own training, pure-Rust inference). A maintainer decision, not just engineering.
 7. **HDR** (Q. HDR, LR-EXP-HDR), **video** (R. Video), **Classic output modules** (Map view, Book, Slideshow module, Print, publish): large, well understood, lower priority than 1–5.
@@ -111,7 +109,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-IMP-ADD-DIALOG | Add photos/folders | P0 | ✅ | `cmd:file.addPhotos`, `cmd:library.importPreview`, `cmd:library.import` (`mode`, `album`, `albumName`, `preset`, `keywords`, `autoWithoutXmp`, `local`), `crates/ui-egui/src/import.rs` | review dialog: background folder scan with live phase, discovered/probed counts and recent paths; candidate grid draws visible rows only, with thumbnails and checkboxes (duplicates by path/content marked and unchecked), destination, album (existing/new), preset, Auto for selected photos without XMP, keywords; batched import with a progress window; one undo step. Drag-and-drop goes through the same background import and move/copy semantics remain documented; a scanned folder is not added to Local; transfer modes support add in place / copy / move, each explained, with delete/kept results and rename tokens.
+| LR-IMP-ADD-DIALOG | Add photos/folders | P0 | ✅ | `cmd:file.addPhotos`, `cmd:library.importPreview`, `cmd:library.import` (`mode`, `album`, `albumName`, `preset`, `keywords`, `autoWithoutXmp`, `local`), `crates/ui-egui/src/import.rs` | review dialog: background folder scan with live phase, discovered/probed counts and recent paths; candidate grid draws visible rows only, with thumbnails and checkboxes (duplicates by path/content marked and unchecked), destination, album (existing/new), preset, Auto for selected photos without XMP, keywords; worker-prepared batched import with a progress window; shared Auto option parsing for UI and commands; one undo step. Drag-and-drop goes through the same background import and move/copy semantics remain documented; a scanned folder is not added to Local; transfer modes support add in place / copy / move, each explained, with delete/kept results and rename tokens.
 | LR-IMP-DRAGDROP | Drop files/folders to import | P0 | ✅ | `crates/ui-egui/src/lib.rs` (dropped files → `cmd:library.import`) | dropping onto a specific album not supported |
 | LR-IMP-DUPES | Skip duplicates by content | P1 | ✅ | `crates/engine/src/import.rs`, `crates/engine/src/tests_import.rs` | |
 | LR-IMP-DEVICE | Import from camera/card | P1 | ✅ | `cmd:library.devices`, `cmd:file.addFromDevice`, `crates/engine/src/devices.rs` | mounted volumes with a DCIM folder (macOS /Volumes, Linux /media and /run/media, Windows drive letters); File → Import from Device → the import review, copying into the library by default; menus serve the last scan and rescan in the background (never blocking a frame; hot-plugs repaint); copies are verified (a new file, synced, checked against the content hash the scan computed — byte compare with the source when there is none, issue #134; a bad copy is removed and reported as failed, never counted as imported; taken names get -1, -2…, never replaced — issue #96, `crates/engine/src/import_move.rs`); no PTP/MTP (cameras that don't mount as a disk) |
@@ -164,7 +162,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-VIEW-PHOTOGRID | Justified photo grid | P0 | ✅ | `cmd:view.photoGrid`, `cmd:library.groups`, `cmd:library.sort` (`group`), `crates/ui-egui/src/panels/grid.rs`, `crates/catalog/src/dates.rs` | grouped by capture / import / edit date (day headers “Wednesday, 30 September 2026 · 12 photos”, months or years when zoomed out, or a fixed day/month/year/none choice in the sort menu); sticky header; clicking a header selects its photos; stacks never split; scrolls to the active photo only when it changes (or the grid comes back on screen), never on its own |
+| LR-VIEW-PHOTOGRID | Justified photo grid | P0 | ✅ | `cmd:view.photoGrid`, `cmd:library.groups`, `cmd:library.sort` (`group`), `crates/ui-egui/src/panels/grid.rs`, `crates/catalog/src/dates.rs` | grouped by capture / import / edit date (day headers “Wednesday, 30 September 2026 · 12 photos”, months or years when zoomed out, or a fixed day/month/year/none choice in the sort menu); sticky header; clicking a header selects its photos; stacks never split; preserves restored selection scroll on the first grid frame; follows later active-photo changes outside Local browsing |
 | LR-VIEW-SQUAREGRID | Square grid | P0 | ✅ | `cmd:view.squareGrid` | same date headers as the photo grid |
 | LR-VIEW-DETAIL | Single-photo view | P0 | ✅ | `cmd:view.detail`, `crates/ui-egui/src/panels/detail.rs` | |
 | LR-VIEW-EDIT | Edit view | P0 | ✅ | `cmd:panel.edit` | |

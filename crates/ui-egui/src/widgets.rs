@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(drag_value(spec, 6500.0, 1.0, 240.0, false), 6510.0);
         assert_eq!(drag_value(spec, 6500.0, 1.0, 240.0, true), 6501.0);
         assert_eq!(spec.step, 1.0);
-        let relative = ControlSpec { id: "wb.tempRel", min: -100.0, max: 100.0, step: 0.1, ..spec.clone() };
+        let relative = ControlSpec { id: "wb.tempRel", min: -100.0, max: 100.0, step: 0.1, ..*spec };
         let mut value = 0.0;
         for _ in 0..10 {
             value = drag_value(&relative, value, 1.0, 240.0, true);

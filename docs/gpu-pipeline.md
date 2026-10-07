@@ -72,7 +72,8 @@ use (e.g. `Intel(R) UHD Graphics 630 (Dx12)`).
 - Buffers, not textures: images are `array<f32>` with the CPU's interleaved layout (RGB, 1–3
   channels), so upload / readback are plain copies of `Rgb32f` / `Plane` / `Rgba8` data.
 - Kernels (`crates/gpu/src/wgsl/`): `geom` (orientation pixel map, bilinear through the
-  crop/straighten/flip affine or the full lens + perspective warp), `resize` (separable resample
+  crop/straighten/flip affine or the full lens + perspective warp, with a shared one-source-pixel
+  transition to the neutral border so CPU/GPU rounding cannot produce isolated edge spikes), `resize` (separable resample
   with the CPU's taps; Mitchell prefilter, box/bilinear for the fast guided filter), `blur` (box
   passes with running sums over pixel chunks; three each way = the CPU's Gaussian), `map`
   (log luminance, dark channel, guided-filter steps, white balance, luminance / colour NR, airlight

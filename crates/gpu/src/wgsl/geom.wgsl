@@ -177,7 +177,10 @@ fn sample_warp(@builtin(global_invocation_id) g: vec3<u32>) {
     let s = corrected_to_source(c, 1u);
     let sx = pf(10u);
     let sy = pf(11u);
-    if (!(s.x >= -0.5 && s.y >= -0.5 && s.x <= pf(12u) + 0.5 && s.y <= pf(13u) + 0.5)) {
+    // Match the CPU's one-source-pixel transition to the neutral border.
+    let edge = min(min(s.x, s.y), min(pf(12u) - s.x, pf(13u) - s.y));
+    let coverage = clamp(edge + 1.0, 0.0, 1.0);
+    if (coverage == 0.0) {
         put(g.y * w + g.x, vec3<f32>(BLANK_R, BLANK_G, BLANK_B));
         return;
     }
@@ -191,5 +194,6 @@ fn sample_warp(@builtin(global_invocation_id) g: vec3<u32>) {
     if (pu(64u) != 0u) {
         v = v * warp_gain(s);
     }
-    put(g.y * w + g.x, v);
+    let blank = vec3<f32>(BLANK_R, BLANK_G, BLANK_B);
+    put(g.y * w + g.x, blank + (v - blank) * coverage);
 }

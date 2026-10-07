@@ -76,6 +76,7 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
         rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
         metadata_preset,
         convert_dng: bool_or(p, "dng", false),
+        auto_without_xmp: bool_or(p, "autoWithoutXmp", false),
         local: bool_or(p, "local", false),
     };
     let album_name = str_param(p, "albumName").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
@@ -914,58 +915,13 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import Photos",
             ["File"],
             Some("Cmd+Shift+I"),
-            "{paths: [file or folder (recursive)], mode?: add|copy|move (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/; move = as copy, then each original and its XMP sidecars are removed from the source — only after the copy is verified (a hard link on the same volume, else copied, synced and compared byte for byte) and its catalog record is saved; failed, duplicate and unchecked files keep their sources; a taken name gets -1, -2…; undo removes the photos from the library but leaves the files at the destination), destination?: folder for copies / moves, organize?: date (YYYY/YYYY-MM-DD) | month (YYYY/YYYY-MM) | flat | a folder template, e.g. `{date:%Y}/{date:%Y%m%d}` → 2026/20260114 (the template's `/` make the folders, each level expanded with the rename tokens and made a safe folder name: never outside the destination; must be relative, no `..`; a level with missing metadata is `unknown`) — dated by capture time, else the import time, rename?: file-name template for copies, original extension added (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each; blank = keep names), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG; copy only), local?: bool (browsing: the photos stay out of the library, like library.browse; not with move), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..], autoWithoutXmp?: bool} → {imported, duplicates, failed, moved?: [{from, to, sidecars?}], kept?: [{path, reason}] (move: sources left in place and why), album?}"
+            "{paths: [file or folder (recursive)], mode?: add|copy|move (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/; move = as copy, then each original and its XMP sidecars are removed from the source — only after the copy is verified (a hard link on the same volume, else copied, synced and compared byte for byte) and its catalog record is saved; failed, duplicate and unchecked files keep their sources; a taken name gets -1, -2…; undo removes the photos from the library but leaves the files at the destination), destination?: folder for copies / moves, organize?: date (YYYY/YYYY-MM-DD) | month (YYYY/YYYY-MM) | flat | a folder template, e.g. `{date:%Y}/{date:%Y%m%d}` → 2026/20260114 (the template's `/` make the folders, each level expanded with the rename tokens and made a safe folder name: never outside the destination; must be relative, no `..`; a level with missing metadata is `unknown`) — dated by capture time, else the import time, rename?: file-name template for copies, original extension added (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each; blank = keep names), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG; copy only), local?: bool (browsing: the photos stay out of the library, like library.browse; not with move), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..], autoWithoutXmp?: bool} → {imported, duplicates, failed, moved?: [{from, to, sidecars?}], kept?: [{path, reason}] (move: sources left in place and why), album?}",
             always,
             |s, p| {
                 let req = import_params(s, p)?;
                 if req.paths.is_empty() {
                     return Err(bad("library.import", "no paths"));
                 }
-                let mode = match str_param(p, "mode").unwrap_or("add") {
-                    "add" => crate::import::ImportMode::Add,
-                    "copy" => crate::import::ImportMode::Copy,
-                    "move" => crate::import::ImportMode::Move,
-                    other => return Err(bad("library.import", format!("unknown mode `{other}` (add|copy|move)"))),
-                };
-                let local = super::bool_or(p, "local", false);
-                let preset = match str_param(p, "preset").filter(|x| !x.is_empty()) {
-                    Some(id) => {
-                        Some(s.presets.iter().find(|x| x.id == id).cloned().ok_or_else(|| bad("library.import", format!("unknown preset `{id}`")))?)
-                    }
-                    None => None,
-                };
-                let mut album = p.get("album").and_then(Value::as_u64);
-                if let Some(a) = album
-                    && s.catalog.album(AlbumId(a)).is_none_or(|al| al.folder || al.is_smart())
-                {
-                    return Err(bad("library.import", "album must be a regular album"));
-                }
-                let organize = match str_param(p, "organize") {
-                    Some(o) => {
-                        crate::import::Organize::parse(o).ok_or_else(|| bad("library.import", format!("unknown organize `{o}` (date|month|flat)")))?
-                    }
-                    None => Default::default(),
-                };
-                let metadata_preset = str_param(p, "metadataPreset").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
-                if let Some(n) = &metadata_preset
-                    && !s.metadata_presets.iter().any(|m| m.name.eq_ignore_ascii_case(n))
-                {
-                    return Err(bad("library.import", format!("unknown metadata preset `{n}`")));
-                }
-                let opts = crate::import::ImportOptions {
-                    mode,
-                    preset,
-                    keywords: strs(p, "keywords"),
-                    destination: str_param(p, "destination").map(str::to_string),
-                    organize,
-                    rename: str_param(p, "rename").map(str::to_string),
-                    rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
-                    metadata_preset,
-                    local,
-                    convert_dng: super::bool_or(p, "dng", false),
-                    auto_without_xmp: super::bool_or(p, "autoWithoutXmp", false),
-                    ..Default::default()
-                };
                 let undo0 = s.undo.len();
                 let report = crate::import::import_with(s, &req.paths, &req.opts)?;
                 let report = import_batch_done(s, report, req.album, req.album_name.as_deref())?;

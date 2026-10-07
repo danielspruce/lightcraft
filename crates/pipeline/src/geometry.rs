@@ -285,7 +285,8 @@ fn sample_warped(base: &Rgb32f, sx: f64, sy: f64, wp: &Warp, o2t: Affine, w: usi
             let t = o2t.apply(Point::new(x as f64 + 0.5, y as f64 + 0.5));
             let c = wp.to_corrected(t);
             let g = wp.corrected_to_source(c, 1);
-            if !wp.inside(g) {
+            let coverage = warp_coverage(g, wp.w, wp.h);
+            if coverage == 0.0 {
                 *px = BLANK;
                 continue;
             }
@@ -300,10 +301,17 @@ fn sample_warped(base: &Rgb32f, sx: f64, sy: f64, wp: &Warp, o2t: Affine, w: usi
                 let k = wp.gain(g);
                 v = v.map(|c| c * k);
             }
-            *px = v;
+            *px = std::array::from_fn(|ch| BLANK[ch] + (v[ch] - BLANK[ch]) * coverage);
         }
     });
     out
+}
+
+/// Antialias the source boundary across one source pixel. A hard cutoff makes CPU f64 and
+/// GPU f32 warp coordinates disagree by an entire image-to-border step near the boundary.
+fn warp_coverage(p: Point, w: f64, h: f64) -> f32 {
+    let edge = p.x.min(p.y).min(w - p.x).min(h - p.y);
+    (edge + 1.0).clamp(0.0, 1.0) as f32
 }
 
 /// Whole-image rectangle in normalized coordinates.
@@ -312,6 +320,15 @@ pub const FULL: Rect = Rect::UNIT;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warped_border_is_continuous_across_rounding_error() {
+        let left = warp_coverage(Point::new(-0.50001, 10.0), 100.0, 100.0);
+        let right = warp_coverage(Point::new(-0.49999, 10.0), 100.0, 100.0);
+        assert!((right - left).abs() < 0.00003);
+        assert_eq!(warp_coverage(Point::new(-1.0, 10.0), 100.0, 100.0), 0.0);
+        assert_eq!(warp_coverage(Point::new(0.0, 10.0), 100.0, 100.0), 1.0);
+    }
 
     #[test]
     fn default_frame_is_identity() {

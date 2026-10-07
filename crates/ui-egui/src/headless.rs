@@ -846,6 +846,8 @@ mod tests {
             w["result"].as_array().unwrap().iter().filter_map(|x| x["id"].as_str().map(String::from)).collect()
         };
         h.request("ui.set", json!({"leftPanel": true}), t);
+        // Windows' temp directory is below Home; keep this test location as its own root.
+        h.request("engine.execute", json!({"command": "local.addRoot", "params": {"path": path}}), t);
         h.request("engine.execute", json!({"command": "library.browse", "params": {"path": path}}), t);
         h.settle(SETTLE);
         assert!(ids(&mut h).contains(&format!("source:local:{path}")));
@@ -870,6 +872,11 @@ mod tests {
     #[test]
     fn kept_local_root_stays_while_browsing_below_and_elsewhere() {
         let mut h = demo([1300.0, 1400.0]);
+        // Keep the temporary "Other" location outside the built-in Home tree on Windows,
+        // just as /tmp is outside Home on Unix. The test exercises a transient root.
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            h.app.ui.hidden_locations.push(home);
+        }
         let t = Duration::from_secs(10);
         let base = std::env::temp_dir().join(format!("lc-ui-roots-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -877,8 +884,12 @@ mod tests {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
         let s = |p: std::path::PathBuf| p.to_string_lossy().to_string();
-        let (photos, day1, day2, other) =
-            (s(base.join("Photos")), s(base.join("Photos/2026/20260101")), s(base.join("Photos/2026/20260114")), s(base.join("Other")));
+        let (photos, day1, day2, other) = (
+            s(base.join("Photos")),
+            s(base.join("Photos").join("2026").join("20260101")),
+            s(base.join("Photos").join("2026").join("20260114")),
+            s(base.join("Other")),
+        );
         let exec = |h: &mut Headless, c: &str, p: Value| h.request("engine.execute", json!({"command": c, "params": p}), t);
         let rects = |h: &mut Headless| -> std::collections::HashMap<String, f64> {
             let w = h.request("ui.widgets", json!({"filter": "lc-ui-roots-"}), t);
