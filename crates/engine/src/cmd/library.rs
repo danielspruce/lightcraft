@@ -83,6 +83,7 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
         rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
         metadata_preset,
         convert_dng: bool_or(p, "dng", false),
+        auto_without_xmp: bool_or(p, "autoWithoutXmp", false),
         local: bool_or(p, "local", false),
     };
     let album_name = str_param(p, "albumName").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);

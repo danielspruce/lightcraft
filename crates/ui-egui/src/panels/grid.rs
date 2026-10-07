@@ -223,21 +223,17 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let stacks = app.caches.grid.stacks(stats, &app.session.catalog, generation);
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
-    // Keep the active photo in view when navigating the library or when the grid returns to
-    // screen, but preserve the user's scroll position while browsing a local folder and while
-    // restoring the grid on the first frame.
+    // bring the active photo into view when it changes (keyboard, click, command) or the grid
+    // comes back on screen; otherwise the scroll position is the user's
     let scroll_to: Option<Rect> = {
         let key = egui::Id::new("grid-last-active");
-        let last: Option<PhotoId> = ui.data(|d| d.get_temp(key));
+        let last: Option<Option<PhotoId>> = ui.data(|d| d.get_temp(key));
         ui.data_mut(|d| d.insert_temp(key, active));
-        if app.session.source != lightcraft_engine::LibrarySource::Folder
-            && last.is_some()
-            && follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active)
-        {
-            active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
-        } else {
-            None
-        }
+        // Restoring a selection is not navigation; retain the restored scroll position.
+        let follow = last.is_some_and(|previous| previous != active)
+            && app.session.source != lightcraft_engine::LibrarySource::Folder
+            && follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active);
+        if follow { active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied()) } else { None }
     };
     let mut visible_ids = HashSet::new();
     let mut visited = 0u64;
@@ -907,15 +903,14 @@ pub fn context_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if ui.add_enabled(app.session.clipboard.is_some(), egui::Button::new(crate::i18n::tr("Paste Selected Settings…"))).clicked() {
         let _ = app.run("dialog.pasteSettings", json!({}));
     }
-    if ui.button(crate::i18n::tr("Reset Edits")).clicked() {
-        let _ = app.run("develop.reset", json!({}));
-    }
     if ui.button("Auto Settings for Selected Photos").clicked() {
         let _ = app.run("develop.autoSelected", json!({}));
         ui.close();
     }
+    if ui.button(crate::i18n::tr("Reset Edits")).clicked() {
+        let _ = app.run("develop.reset", json!({}));
+    }
     ui.menu_button(crate::i18n::tr("Photo Merge"), |ui| {
-
         let n = app.session.targets(&json!({})).len();
         for (id, label) in [("dialog.mergeHdr", "HDR…"), ("dialog.mergePanorama", "Panorama…"), ("dialog.mergeHdrPanorama", "HDR Panorama…")] {
             if ui.add_enabled(n >= 2, egui::Button::new(label)).clicked() {
@@ -978,7 +973,6 @@ pub fn context_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             let _ = app.run("dialog.deleteFromDisk", json!({}));
             ui.close();
         }
-    }
     }
 }
 

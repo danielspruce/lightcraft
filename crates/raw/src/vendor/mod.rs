@@ -38,7 +38,7 @@ pub(crate) fn black_from_columns(data: &[u16], width: usize, cols: Range<usize>,
             let mid = v.len() / 2;
             let even = v.len() % 2 == 0;
             let (lower, median, _) = v.select_nth_unstable(mid);
-            if even { (*lower.iter().max().unwrap() as f32 + *median as f32) * 0.5 } else { *median as f32 }
+            if even { (*lower.iter().max().unwrap_or(median) as f32 + *median as f32) * 0.5 } else { *median as f32 }
         })
         .collect();
     BlackLevel { repeat_rows: 2, repeat_cols: 2, values, delta_h: vec![], delta_v: vec![] }

@@ -100,7 +100,7 @@ pub fn refine(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings, preview: &Rg
                         6 => (&mut candidate.vibrance, 30.0, 0.0, 100.0),
                         7 => (&mut candidate.saturation, 30.0, 0.0, 100.0),
                         i => {
-                            let cal = candidate.calibration.as_mut().expect("reference calibration");
+                            let Some(cal) = candidate.calibration.as_mut() else { continue };
                             let v = match i {
                                 8 => &mut cal.red_hue,
                                 9 => &mut cal.red_sat,

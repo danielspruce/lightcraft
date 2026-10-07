@@ -947,6 +947,7 @@ mod tests {
         let ids = |h: &mut Headless| -> Vec<String> { rects(h).into_iter().map(|(id, _)| id).collect() };
         h.request("ui.set", json!({"leftPanel": true}), t);
         h.hide_home_above(&dir);
+        // Windows' temp directory is below Home; keep this test location as its own root.
         // Browse Folder… browses the picked folder and keeps it in Local within one frame; a
         // request runs frames, so keep it first (no frame sees it browsed but not yet kept)
         let r = h.request("engine.execute", json!({"command": "local.addRoot", "params": {"path": path}}), t);
@@ -994,6 +995,11 @@ mod tests {
     #[test]
     fn kept_local_root_stays_while_browsing_below_and_elsewhere() {
         let mut h = demo([1300.0, 1400.0]);
+        // Keep the temporary "Other" location outside the built-in Home tree on Windows,
+        // just as /tmp is outside Home on Unix. The test exercises a transient root.
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            h.app.ui.hidden_locations.push(home);
+        }
         let t = Duration::from_secs(10);
         let base = std::env::temp_dir().join(format!("lc-ui-roots-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);

@@ -46,6 +46,17 @@ fn grid(view: ViewMode) -> Headless {
     h
 }
 
+#[test]
+fn restored_selection_does_not_scroll_the_first_grid_frame() {
+    let mut session = library();
+    session.selection = lightcraft_engine::Selection::single(PhotoId(2001));
+    let mut app = LightcraftApp::new(session, Services { png: None, ..Default::default() });
+    app.ui.view = ViewMode::PhotoGrid;
+    let mut h = Headless::new(app, [1200.0, 800.0], 1.0);
+    h.settle(SETTLE);
+    assert_eq!(h.app.grid_scroll, Some(0.0), "a restored selection must not replace the grid scroll position");
+}
+
 fn widget(h: &Headless, id: &str) -> Option<egui::Rect> {
     h.app.widgets.iter().find(|(w, _)| w == id).map(|(_, r)| *r)
 }

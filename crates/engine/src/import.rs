@@ -97,7 +97,7 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
-    /// Run Auto on imported photos that have no XMP sidecar or embedded XMP packet.
+    /// Run Auto on imported photos without XMP.
     pub auto_without_xmp: bool,
 }
 
@@ -200,30 +200,6 @@ pub struct ImportReport {
     pub scanned: usize,
     /// Photos whose metadata/develop settings were read from an XMP sidecar (or embedded XMP).
     pub sidecars: usize,
-}
-
-/// Live status for preparing the import review. `total` is unknown during folder traversal.
-#[derive(Clone, Debug, Default)]
-pub struct ImportScanProgress {
-    pub phase: String,
-    pub done: usize,
-    pub total: usize,
-    pub recent_paths: Vec<String>,
-}
-
-pub type ImportScanProgressState = std::sync::Arc<std::sync::Mutex<ImportScanProgress>>;
-
-fn progress_update(state: &ImportScanProgressState, phase: &str, done: usize, total: usize, path: &str) {
-    let Ok(mut p) = state.lock() else { return };
-    p.phase = phase.to_string();
-    p.done = done;
-    p.total = total;
-    if !path.is_empty() && p.recent_paths.last().is_none_or(|last| last != path) {
-        p.recent_paths.push(path.to_string());
-        if p.recent_paths.len() > 3 {
-            p.recent_paths.remove(0);
-        }
-    }
 }
 
 /// A file moved by an import.
@@ -350,7 +326,7 @@ pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
     expand_with_progress(paths, skip, None)
 }
 
-fn expand_with_progress(paths: &[String], skip: Option<&Path>, progress: Option<&ImportScanProgressState>) -> Vec<String> {
+fn expand_with_progress(paths: &[String], skip: Option<&Path>, progress: Option<&ScanProgress>) -> Vec<String> {
     expand_within_with_progress(paths, skip, crate::walk::Limits::default(), progress).0
 }
 
@@ -363,18 +339,22 @@ fn expand_within_with_progress(
     paths: &[String],
     skip: Option<&Path>,
     limits: crate::walk::Limits,
-    progress: Option<&ImportScanProgressState>,
+    progress: Option<&ScanProgress>,
 ) -> (Vec<String>, bool) {
+    use std::sync::atomic::Ordering::Relaxed;
     let mut out = Vec::new();
     let mut truncated = false;
     for p in paths {
+        if progress.is_some_and(|progress| progress.cancel.load(Relaxed)) {
+            break;
+        }
         let p = Path::new(p);
         if skip.is_some_and(|s| p == s) {
             continue;
         }
         if p.is_dir() {
             if let Some(progress) = progress {
-                progress_update(progress, "Finding photos", out.len(), 0, &p.to_string_lossy());
+                progress.update("Finding photos", p);
             }
             let w = crate::walk::files_in(p, skip, limits, is_supported);
             if w.truncated {
@@ -385,6 +365,7 @@ fn expand_within_with_progress(
                     limits.max_entries,
                     limits.max_depth
                 );
+
             }
             truncated |= w.truncated;
             out.extend(w.files.into_iter().map(|f| f.to_string_lossy().to_string()));
@@ -392,7 +373,7 @@ fn expand_within_with_progress(
             // explicitly named files are attempted even with an unknown extension (sniffed)
             out.push(p.to_string_lossy().to_string());
             if let Some(progress) = progress {
-                progress_update(progress, "Finding photos", out.len(), 0, &p.to_string_lossy());
+                progress.found.store(out.len(), std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -471,6 +452,7 @@ fn probe_all_with_progress(s: &Session, paths: &[String], progress: Option<&Impo
     out
 }
 
+
 fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress: &ScanProgress) -> Vec<Result<ProbeInfo, String>> {
     use std::sync::atomic::Ordering::Relaxed;
     let Some(probe) = probe.cloned() else {
@@ -490,7 +472,6 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
-            let completed = std::sync::atomic::AtomicUsize::new(0);
             let out = std::sync::Mutex::new(&mut results);
             std::thread::scope(|sc| {
                 for _ in 0..n {
@@ -503,6 +484,7 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                             if progress.cancel.load(Relaxed) {
                                 break;
                             }
+                            progress.update("Checking photos", Path::new(&paths[i]));
                             let r = probe(&paths[i]);
                             progress.done.fetch_add(1, Relaxed);
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
@@ -519,6 +501,7 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
             if progress.cancel.load(Relaxed) {
                 return Err("cancelled".into());
             }
+            progress.update("Checking photos", Path::new(p));
             let r = probe(p);
             progress.done.fetch_add(1, Relaxed);
             r
@@ -556,6 +539,29 @@ pub struct ScanProgress {
     pub total: std::sync::atomic::AtomicUsize,
     pub done: std::sync::atomic::AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
+    pub found: std::sync::atomic::AtomicUsize,
+    pub details: std::sync::Mutex<ScanDetails>,
+}
+
+/// Current scan phase and a bounded list of recently visited paths.
+#[derive(Clone, Debug, Default)]
+pub struct ScanDetails {
+    pub phase: String,
+    pub recent_paths: Vec<String>,
+}
+
+impl ScanProgress {
+    fn update(&self, phase: &str, path: &Path) {
+        let Ok(mut details) = self.details.lock() else { return };
+        details.phase = phase.into();
+        let path = path.to_string_lossy().into_owned();
+        if details.recent_paths.last() != Some(&path) {
+            details.recent_paths.push(path);
+            if details.recent_paths.len() > 3 {
+                details.recent_paths.remove(0);
+            }
+        }
+    }
 }
 
 /// The result of [`scan_with`]: the candidates, and the probes to keep for the import that follows.
@@ -622,6 +628,7 @@ pub fn scan_with_progress(
     if let Some(progress) = progress {
         progress_update(progress, "Finding photos", 0, 0, "");
     }
+
     let out = scan_with(input, &paths, &ScanProgress::default());
     if let Some(progress) = progress {
         progress_update(progress, "Checking photos", out.candidates.len(), out.candidates.len(), "");
@@ -634,7 +641,7 @@ pub fn scan_with_progress(
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
-    let files = expand(paths, input.skip.as_deref());
+    let files = expand_with_progress(paths, input.skip.as_deref(), Some(progress));
     let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
     progress.total.store(todo.len(), Relaxed);
     // probes from a preceding `scan` are reused when the file is unchanged (same size)
@@ -652,9 +659,6 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
     let probed: Vec<Result<ProbeInfo, String>> =
         cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
     crate::memory::release();
-    if let Some(progress) = progress {
-        progress_update(progress, "Preparing review", files.len(), files.len(), "");
-    }
     let mut probes: HashMap<String, Result<ProbeInfo, String>> = todo.into_iter().zip(probed).collect();
     let mut seen_hash: HashMap<String, Option<u64>> = input.by_hash.into_iter().map(|(h, id)| (h, Some(id.0))).collect();
     let mut out = Vec::with_capacity(files.len());
@@ -723,7 +727,7 @@ pub struct ImportJob {
     lib_dir: Option<PathBuf>,
     copy_root: Option<PathBuf>,
     /// path → (photo, a Local browse record?)
-    by_path: HashMap<String, (PhotoId, bool)>,
+    by_path: HashMap<PathBuf, (PhotoId, bool)>,
     /// content hash → the photo that has it (`None`: a file earlier in this import)
     by_hash: HashMap<String, Option<PhotoId>>,
     probe: Option<crate::media::FileProbe>,
@@ -867,7 +871,7 @@ impl ImportJob {
                 continue;
             }
             if let Source::File { path } = &p.source {
-                by_path.insert(path.clone(), (p.id, p.local));
+                by_path.insert(PathBuf::from(path), (p.id, p.local));
             }
             if let Some(h) = &p.content_hash {
                 by_hash.insert(h.clone(), Some(p.id));
@@ -921,10 +925,10 @@ impl ImportJob {
         let mut out = Prepared { scanned: files.len(), items: Vec::new() };
         let mut todo = Vec::new();
         for f in files {
-            match self.by_path.get(f.as_str()).copied() {
+            match self.by_path.get(Path::new(&f)).copied() {
                 Some((id, true)) if !opts.local => {
                     // a file that was only browsed (Local) joins the library when it is imported for real
-                    self.by_path.insert(f, (id, false));
+                    self.by_path.insert(PathBuf::from(f), (id, false));
                     out.items.push(PreparedItem::Promote(id));
                     self.done.fetch_add(1, Relaxed);
                 }
@@ -1252,6 +1256,7 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
     // Move: placed at the destination, sources untouched until the records are committed
     let mut placed: Vec<crate::import_move::Placed> = Vec::new();
     // photos added by this batch, by content (a duplicate of a file earlier in the import names it)
+    let mut auto_ids = Vec::new();
     let mut new_hash: HashMap<String, PhotoId> = HashMap::new();
     // Fresh: trashed photos a new import replaces (by content or by file), each removed once
     let (mut trash_hash, mut trash_path): (HashMap<String, PhotoId>, HashMap<String, PhotoId>) = Default::default();
@@ -1340,6 +1345,9 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                     p.history.push(lightcraft_catalog::HistoryStep { label, settings: d });
                 }
                 report.imported.push(id.0);
+                if opts.auto_without_xmp && !has_xmp {
+                    auto_ids.push(id);
+                }
                 p.local = opts.local;
                 if opts.local {
                     // the state as browsed: a later change keeps the record from being forgotten
@@ -1369,16 +1377,12 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
     if !placed.is_empty() {
         finish_moves(s, placed, log0, &mut report);
     }
-    if !auto_ids.is_empty() {
-        let selection = s.selection.clone();
-        for id in auto_ids {
-            s.selection = crate::view::Selection::single(id);
-            // A malformed or unsupported source must not turn a successful import into a partial
-            // failure. The photo remains imported with its normal defaults.
-            let _ = s.execute("develop.auto", &serde_json::Value::Null);
-        }
-        s.selection = selection;
+    let selection = s.selection.clone();
+    for id in auto_ids {
+        s.selection = crate::view::Selection::single(id);
+        let _ = s.execute("develop.auto", &serde_json::Value::Null);
     }
+    s.selection = selection;
     Ok(report)
 }
 

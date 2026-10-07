@@ -48,6 +48,7 @@ pub(crate) fn note_dialog_bottom(ui: &egui::Ui) {
     }
 }
 
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ImportDialog {
@@ -227,6 +228,8 @@ pub struct ImportTask {
     pub kept: usize,
     undo0: usize,
     first: Option<u64>,
+    preserve_selection: bool,
+    selection_before: lightcraft_engine::Selection,
     /// Reading a folder for the Local view: the photos stay out of the library, and nothing is
     /// selected or announced as added.
     browse: bool,
@@ -322,9 +325,10 @@ impl ImportRun {
                 }
                 let prepared = match lightcraft_engine::guard::catch("import", || job.prepare_files(chunk.to_vec(), &cancel)) {
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(_) => break, // logged; the files readied so far are added
                 };
                 if let Err(unsent) = tx.send(prepared) {
+                    // the import was dropped: nothing will add these, so take back what a Move placed
                     unsent.0.rollback();
                     break;
                 }
@@ -431,6 +435,7 @@ pub fn browse(app: &mut LightcraftApp, path: &str, subfolders: Option<bool>) -> 
     let subfolders = subfolders.unwrap_or_else(|| app.session.browse.as_ref().is_some_and(|b| b.subfolders));
     let running = app.scan.as_ref().is_some_and(|t| t.browse) || app.import.as_ref().is_some_and(|t| t.browse);
     if running && app.session.browse.as_ref().is_some_and(|b| b.path == dir_s && b.subfolders == subfolders) {
+        // already reading this folder: clicking it again must not restart the progress
         app.session.source = lightcraft_engine::LibrarySource::Folder;
         return Ok(json!({"path": dir_s, "subfolders": subfolders, "scanning": true}));
     }
@@ -495,6 +500,7 @@ pub fn poll_scan(app: &mut LightcraftApp, ctx: &egui::Context) {
     }
     app.session.import_probes = out.probes;
     if task.browse {
+        // what the library doesn't know yet joins the Local view
         let queue: Vec<String> =
             out.candidates.iter().filter(|c| c.duplicate != Some("path".into()) && c.error.is_none()).map(|c| c.path.clone()).collect();
         if !queue.is_empty() {
@@ -530,8 +536,9 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let total = task.progress.total.load(Ordering::Relaxed);
     let done = task.progress.done.load(Ordering::Relaxed);
+    let details = task.progress.details.lock().map(|d| d.clone()).unwrap_or_default();
     let text = if total == 0 {
-        if task.browse { "Reading folder…" } else { "Looking for photos…" }.to_string()
+        if task.browse { crate::i18n::tr("Reading folder…") } else { format!("Finding photos · {} found", task.progress.found.load(Ordering::Relaxed)) }
     } else {
         crate::i18n::tr_format!("Reading photos… {done} of {total}", done = done, total = total)
     };
@@ -540,15 +547,19 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
         .title_bar(false)
         .resizable(false)
         .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
-        .fixed_size([340.0, 80.0])
+        .fixed_size([620.0, 146.0])
         .show(ctx, |ui| {
             ui.label(egui::RichText::new(text).color(t.text));
             ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(320.0));
+            for path in details.recent_paths.iter().rev() {
+                ui.add(egui::Label::new(egui::RichText::new(path).small().color(t.text_dim)).truncate()).on_hover_text(path);
+            }
             let r = ui.button(crate::i18n::tr("Cancel"));
             register(ui.ctx(), "button:scanCancel", r.rect);
             cancel = r.clicked();
         });
     if cancel {
+        // the worker stops at its next file; don't wait for it (a NAS read can take a while)
         task.progress.cancel.store(true, Ordering::Relaxed);
         app.scan = None;
     }
@@ -586,14 +597,12 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
     if let Some(a) = album {
         params["album"] = json!(a);
     }
+    params["autoWithoutXmp"] = json!(d.auto_without_xmp);
     if !d.preset.is_empty() {
         params["preset"] = json!(d.preset);
     }
     if !d.metadata_preset.is_empty() {
         params["metadataPreset"] = json!(d.metadata_preset);
-    }
-    if d.auto_without_xmp {
-        params["autoWithoutXmp"] = json!(true);
     }
     if d.copy {
         if !d.destination.trim().is_empty() {
@@ -615,6 +624,8 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
     if d.auto_without_xmp {
         task.keep_selection = Some(app.session.selection.clone());
     }
+    task.preserve_selection = d.auto_without_xmp;
+    task.selection_before = app.session.selection.clone();
     app.import = Some(task);
     app.renderer.forget_imports();
     Ok(json!({"importing": total}))
@@ -660,6 +671,9 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     let finished = batches.is_none();
     for prepared in batches.into_iter().flatten() {
         commit_batch(app, &mut task, prepared);
+        if task.preserve_selection {
+            app.session.selection = task.selection_before.clone();
+        }
         // arriving photos don't take over the selection
         if let Some(sel) = &task.keep_selection {
             app.session.selection = sel.clone();
@@ -743,7 +757,7 @@ fn finish(app: &mut LightcraftApp, ctx: &egui::Context, task: ImportTask) {
     }
     if !task.preserve_selection
         && let Some(f) = task.first
-
+    {
         let _ = app.run("library.select", json!({"ids": [f]}));
     }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -819,35 +833,6 @@ fn show_existing(app: &mut LightcraftApp, ctx: &egui::Context, existing: &[u64])
 /// The progress window while an import runs, with Cancel (files already copied or added stay;
 /// nothing new is started).
 pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
-    if let Some(task) = &app.import_scan {
-        let t = Tokens::get(ctx);
-        let status = task.progress.lock().map(|p| p.clone()).unwrap_or_default();
-        egui::Window::new("Scanning folder")
-            .title_bar(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
-            .fixed_size([620.0, 146.0])
-            .show(ctx, |ui| {
-                let label = if status.total == 0 {
-                    format!("{} · {} photos found", status.phase, status.done)
-                } else {
-                    format!("{} · {} of {}", status.phase, status.done, status.total)
-                };
-                ui.label(egui::RichText::new(label).color(t.text));
-                if status.total > 0 {
-                    ui.add(egui::ProgressBar::new(status.done as f32 / status.total as f32).desired_width(f32::INFINITY));
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Searching folders; total file count is not known yet");
-                    });
-                }
-                for path in status.recent_paths.iter().rev() {
-                    ui.add(egui::Label::new(egui::RichText::new(path).small().color(t.text_dim)).truncate()).on_hover_text(path);
-                }
-            });
-        return;
-    }
     let Some(task) = &app.import else { return };
     let t = Tokens::get(ctx);
     let frac = task.done as f32 / task.total.max(1) as f32;
@@ -917,6 +902,8 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             }
         });
     }
+    let r = ui.checkbox(&mut d.auto_without_xmp, "Apply Auto to photos without XMP");
+    register(ui.ctx(), "check:importAutoWithoutXmp", r.rect);
     // candidate grid
     let cell = 116.0;
     let avail = ui.available_width();
@@ -1189,8 +1176,6 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             }
         });
     });
-    let r = ui.checkbox(&mut d.auto_without_xmp, "Apply Auto to photos without XMP");
-    register(ui.ctx(), "check:importAutoWithoutXmp", r.rect);
     if !app.session.metadata_presets.is_empty() {
         field(ui, "Metadata", |ui| {
             let cur = if d.metadata_preset.is_empty() { crate::i18n::tr("None").to_string() } else { d.metadata_preset.clone() };

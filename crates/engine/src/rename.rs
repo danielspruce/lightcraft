@@ -395,12 +395,12 @@ impl MoveFs for RealFs {
 /// `from` → `to` differs only in letter case and `to` is that very file (a case-insensitive
 /// volume): the rename must go through a temporary name.
 fn is_respelling(fs: &dyn MoveFs, from: &Path, to: &Path) -> bool {
-    from != to && folded_path(&from.to_string_lossy()) == folded_path(&to.to_string_lossy()) && fs.exists(to) && fs.same_file(from, to)
+    from != to && folded_path(from) == folded_path(to) && fs.exists(to) && fs.same_file(from, to)
 }
 
 /// Windows accepts both separators; spelling differences must not hide file identity.
-fn folded_path(path: &str) -> String {
-    if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path.to_lowercase() }
+fn folded_path(path: &Path) -> String {
+    path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>().join("/")
 }
 
 /// Rename `a` to `b` without ever replacing a file; a change of letter case only goes through a
@@ -595,11 +595,11 @@ fn plan_rename_core(
                 loop {
                     let name = candidate(k);
                     let tp = dir.join(&name).to_string_lossy().to_string();
-                    let key = folded_path(&tp);
+                    let key = folded_path(Path::new(&tp));
                     // this very file, maybe spelled differently (case-insensitive volume)? By
                     // identity: on a case-sensitive volume `img_1.jpg` may be another photo
                     let (from, to) = (Path::new(path), Path::new(&tp));
-                    let same = from == to || (key == folded_path(path) && exists(to) && same_file(from, to));
+                    let same = from == to || (from != to && key == folded_path(from) && exists(to) && same_file(from, to));
                     // free: not claimed in this batch and not on disk (unless it is this very file).
                     // A file this batch moves away still counts as taken: simple and safe.
                     if !taken.contains(&key) && (same || !exists(to)) {
@@ -780,7 +780,7 @@ mod tests {
         }
         fn idx(&self, p: &Path) -> Option<usize> {
             let p = Self::norm(p);
-            self.files.borrow().iter().position(|(f, _)| if self.ci { folded_path(f) == folded_path(&p) } else { *f == p })
+            self.files.borrow().iter().position(|(f, _)| if self.ci { folded_path(Path::new(f)) == folded_path(Path::new(&p)) } else { *f == p })
         }
         /// The listing: (exact path, contents), sorted.
         pub fn listing(&self) -> Vec<(String, String)> {

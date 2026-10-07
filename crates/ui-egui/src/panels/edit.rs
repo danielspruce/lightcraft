@@ -133,7 +133,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 }
             });
         }
-
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
+            if text_button(ui, "autoSelected", &format!("Auto All {n} Selected Photos"), false)
+                .on_hover_text("Calculate Auto separately for every selected photo. Undo reverts the entire batch.")
+                .clicked()
+                && app.run("develop.autoSelected", json!({})).is_ok()
+            {
+                app.toast(ui.ctx(), format!("Auto settings applied to {n} photos"));
+            }
+        });
     }
     if app.session.auto_sync && n > 1 {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
