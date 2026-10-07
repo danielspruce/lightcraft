@@ -11,6 +11,30 @@ fn active_dev(s: &Session) -> lightcraft_develop::DevelopSettings {
 }
 
 #[test]
+fn changing_one_wb_control_resolves_as_shot_without_stale_tint() {
+    use lightcraft_catalog::{Photo, PhotoId, Source};
+    use lightcraft_develop::{DevelopSettings, WbMode};
+    let mut s = demo();
+    let id = PhotoId(100);
+    let mut p = Photo::new(id, Source::File { path: "synthetic.arw".into() }, "synthetic.arw", "ARW", 16, 16, "");
+    // A catalog made by the old generic-matrix Kelvin inference.
+    p.as_shot_wb = Some((6829.0, -127.0));
+    p.develop = std::sync::Arc::new(DevelopSettings::for_raw(6829.0, -127.0));
+    s.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    s.execute("library.select", &json!({"ids": [100], "active": 100})).unwrap();
+    s.execute("develop.set", &json!({"control": "wb.temp", "value": 8000})).unwrap();
+    let d = active_dev(&s);
+    assert_eq!(d.wb.mode, WbMode::Custom);
+    assert_eq!(d.wb.temp, 8000.0);
+    assert_eq!(d.wb.tint, 0.0, "untouched tint comes from the current as-shot reference");
+    s.execute("develop.wb", &json!({"mode": "asShot"})).unwrap();
+    s.execute("develop.set", &json!({"control": "wb.tint", "value": 10})).unwrap();
+    assert_eq!(active_dev(&s).wb.temp, 6500.0);
+    s.execute("develop.reset", &json!({})).unwrap();
+    assert_eq!((active_dev(&s).wb.temp, active_dev(&s).wb.tint), (6500.0, 0.0));
+}
+
+#[test]
 fn demo_library_loads() {
     let mut s = demo();
     assert_eq!(s.visible().len(), 24);
@@ -659,4 +683,121 @@ fn leaving_an_edited_photo_keeps_an_auto_version() {
     }
     let autos = s.catalog.photo(PhotoId(ids[0])).unwrap().versions.iter().filter(|v| v.auto).count();
     assert_eq!(autos, crate::AUTO_VERSIONS);
+}
+
+#[test]
+fn match_total_exposures() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = demo();
+    let ids: Vec<u64> = s.catalog.photos().take(3).map(|p| p.id.0).collect();
+    // reference 1/100 f/4 ISO 100, slider +0.5; other 1/50 f/4 ISO 100 (one stop more light)
+    for (i, (sh, ap, iso)) in [("1/100", 4.0f32, 100u32), ("1/50", 4.0, 100), ("", 4.0, 100)].iter().enumerate() {
+        let mut m = s.catalog.photo(PhotoId(ids[i])).unwrap().meta.clone();
+        m.shutter = sh.to_string();
+        m.aperture = Some(*ap);
+        m.iso = Some(*iso);
+        s.commit("t", lightcraft_catalog::Op::SetMeta { id: PhotoId(ids[i]), meta: Box::new(m) }).unwrap();
+    }
+    s.execute("library.select", &json!({"ids": ids})).unwrap();
+    s.selection.active = Some(PhotoId(ids[0]));
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.5, "ids": [ids[0]]})).unwrap();
+    let r = s.execute("develop.matchExposure", &json!({})).unwrap();
+    assert_eq!((r["changed"].as_u64(), r["skipped"].clone()), (Some(1), json!([ids[2]])));
+    let e = s.develop_of(PhotoId(ids[1])).unwrap().light.exposure;
+    assert!((e - (-0.5)).abs() < 1e-9, "one stop more light → one stop less exposure: {e}");
+}
+
+#[test]
+fn find_similar_filters_to_look_alikes() {
+    let mut s = demo();
+    let id = s.catalog.photos().next().unwrap().id;
+    let r = s.execute("library.findSimilar", &json!({"id": id.0, "similarity": 0.5})).unwrap();
+    let hits: Vec<u64> = r["photos"].as_array().unwrap().iter().map(|h| h["id"].as_u64().unwrap()).collect();
+    assert_eq!(hits[0], id.0, "the photo itself is the closest");
+    assert!(hits.len() < s.catalog.len(), "not everything looks alike");
+    let vis = s.visible_cloned();
+    assert!(!vis.is_empty() && vis.iter().all(|v| hits.contains(&v.0)), "the view shows only them");
+    s.execute("library.clearFilter", &json!({})).unwrap();
+    assert!(s.visible_cloned().len() > vis.len());
+}
+
+#[test]
+fn quick_develop_adds_to_each_photo() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = demo();
+    let ids: Vec<u64> = s.catalog.photos().take(2).map(|p| p.id.0).collect();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.5, "ids": [ids[0]]})).unwrap();
+    s.execute("library.select", &json!({"ids": ids})).unwrap();
+    let before: Vec<f64> = ids.iter().map(|i| s.develop_of(PhotoId(*i)).unwrap().light.exposure).collect();
+    s.execute("develop.quickAdjust", &json!({"control": "light.exposure", "delta": 1.0 / 3.0})).unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        let e = s.develop_of(PhotoId(*id)).unwrap().light.exposure;
+        assert!((e - before[i] - 1.0 / 3.0).abs() < 0.02, "{e} vs {}", before[i]);
+    }
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.develop_of(PhotoId(ids[0])).unwrap().light.exposure, before[0], "one undo step");
+}
+
+#[test]
+fn mask_components_invert_duplicate_rename_change_mode_and_delete() {
+    use lightcraft_develop::MaskOp;
+    let mut s = demo();
+    s.execute("mask.add", &json!({"kind": "radial"})).unwrap();
+    s.execute("mask.addComponent", &json!({"op": "subtract", "kind": "linear"})).unwrap();
+    let mask = |s: &Session| active_dev(s).masks[0].clone();
+    let id = mask(&s).id;
+    s.execute("mask.component", &json!({"component": 1, "action": "invert"})).unwrap();
+    assert!(mask(&s).components[1].invert);
+    s.execute("mask.component", &json!({"component": 1, "action": "op", "op": "intersect"})).unwrap();
+    assert_eq!(mask(&s).components[1].op, MaskOp::Intersect);
+    s.execute("mask.component", &json!({"component": 0, "action": "rename", "name": " Face "})).unwrap();
+    assert_eq!(mask(&s).components[0].name.as_deref(), Some("Face"));
+    s.execute("mask.component", &json!({"component": 0, "action": "duplicate"})).unwrap();
+    assert_eq!(mask(&s).components.len(), 3);
+    assert_eq!(mask(&s).components[1].name.as_deref(), Some("Face"));
+    // a cleared name falls back to the kind; one undo step each
+    s.execute("mask.component", &json!({"component": 1, "action": "rename", "name": ""})).unwrap();
+    assert_eq!(mask(&s).components[1].name, None);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(mask(&s).components[1].name.as_deref(), Some("Face"));
+    assert!(s.execute("mask.component", &json!({"component": 9, "action": "invert"})).is_err());
+    assert!(s.execute("mask.component", &json!({"component": 0, "action": "explode"})).is_err());
+    // deleting the last component deletes the mask
+    for _ in 0..3 {
+        s.execute("mask.component", &json!({"id": id, "component": 0, "action": "delete"})).unwrap();
+    }
+    assert!(active_dev(&s).masks.is_empty());
+    assert_eq!(s.active_mask, None);
+}
+
+#[test]
+fn curve_reset_by_channel_and_whole() {
+    let mut s = demo();
+    let s_curve = [[0.0, 0.0], [0.25, 0.15], [0.75, 0.85], [1.0, 1.0]];
+    for ch in ["master", "red", "green", "blue"] {
+        s.execute("develop.curve", &json!({"channel": ch, "points": s_curve})).unwrap();
+    }
+    s.execute("develop.set", &json!({"control": "curve.shadows", "value": 30})).unwrap();
+    s.execute("develop.set", &json!({"control": "curve.refineSaturation", "value": 50})).unwrap();
+    // one channel
+    s.execute("curve.reset", &json!({"channel": "red"})).unwrap();
+    let c = active_dev(&s).curve;
+    assert!(c.red.is_empty() && c.green.len() == 4 && c.master.len() == 4, "only red resets");
+    assert_eq!(c.shadows, 30.0);
+    // parametric only
+    s.execute("curve.reset", &json!({"channel": "parametric"})).unwrap();
+    let c = active_dev(&s).curve;
+    assert_eq!(c.shadows, 0.0);
+    assert_eq!(c.master.len(), 4, "point curves stay");
+    // all point curves, then undo restores them in one step
+    s.execute("curve.reset", &json!({"channel": "point"})).unwrap();
+    let c = active_dev(&s).curve;
+    assert!(c.master.is_empty() && c.green.is_empty() && c.blue.is_empty());
+    assert_eq!(c.refine_saturation, 50.0);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).curve.master.len(), 4);
+    // everything (the default)
+    s.execute("curve.reset", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).curve, lightcraft_develop::ToneCurve::default());
+    assert!(s.execute("curve.reset", &json!({"channel": "alpha"})).is_err());
 }

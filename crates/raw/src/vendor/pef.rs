@@ -99,6 +99,10 @@ impl<'a> Bits<'a> {
         self.skip(k);
         v
     }
+    /// Bits handed out so far (may exceed the source length: zeros are read past its end).
+    pub fn consumed_bits(&self) -> usize {
+        self.pos * 8 - self.n as usize
+    }
     pub fn overrun(&self) -> bool {
         self.pos > self.src.len() + 8
     }
@@ -232,7 +236,7 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
     };
     let cfa = match (ifd0.u64s(t::CFA_REPEAT_PATTERN_DIM).as_deref(), ifd0.bytes(t::CFA_PATTERN_EP)) {
         (Some([2, 2]), Some(p)) if p.len() == 4 && p.iter().all(|&c| c <= 2) => Cfa { width: 2, height: 2, pattern: p.to_vec() },
-        _ => Cfa::bayer("BGGR").expect("static"),
+        _ => Cfa::bayer_static("BGGR"),
     };
     let black = match mn.as_ref().and_then(|m| m.ifd.f64s(BLACK_POINT)).as_deref() {
         Some(v @ [_, _, _, _]) => {

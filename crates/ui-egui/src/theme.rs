@@ -39,13 +39,14 @@ pub struct Tokens {
     pub star: Color32,
     pub pick: Color32,
     pub reject: Color32,
+    /// Cautionary notices (e.g. a raw shown from its embedded preview): a muted amber.
+    pub caution: Color32,
     pub mask_overlay: Color32,
     // metrics (points)
     pub top_bar_h: f32,
     pub bottom_bar_h: f32,
     pub panel_w: f32,
     pub strip_w: f32,
-    pub left_w: f32,
     pub slider_row_h: f32,
     pub section_h: f32,
     pub film_h: f32,
@@ -80,12 +81,12 @@ impl Default for Tokens {
             star: Color32::from_rgb(0xd8, 0xd8, 0xd8),
             pick: Color32::from_rgb(0xf0, 0xf0, 0xf0),
             reject: Color32::from_rgb(0xe0, 0x4a, 0x4a),
+            caution: Color32::from_rgb(0xe3, 0xa8, 0x3c),
             mask_overlay: Color32::from_rgba_unmultiplied(0xe0, 0x20, 0x30, 110),
             top_bar_h: 42.0,
             bottom_bar_h: 48.0,
             panel_w: 270.0,
             strip_w: 48.0,
-            left_w: 268.0,
             slider_row_h: 45.0,
             section_h: 57.0,
             film_h: 142.0,
@@ -106,17 +107,53 @@ impl Tokens {
 }
 
 pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions(lightcraft_engine::CRAFT_FONTS));
+}
+
+/// Inter (bundled) for Latin text, egui's default fonts, then the craft-fonts Japanese faces as
+/// the last fallback of every family (BIZ UDPGothic first; Bold first for the semibold family).
+/// Without craft-fonts (`craft` empty) Japanese text has no glyphs and shows as boxes.
+pub fn font_definitions(craft: &'static [lightcraft_engine::CraftFont]) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("Inter".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/Inter-Regular.ttf"))));
     fonts.font_data.insert("Inter-SemiBold".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf"))));
-    let fallback: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let japanese: Vec<_> = lightcraft_engine::fonts::japanese(craft).collect();
+    for f in &japanese {
+        fonts.font_data.insert(craft_font_name(f), Arc::new(FontData::from_static(f.bytes)));
+    }
+    // Craft-fonts faces in preference order for a family drawn in `style`.
+    let fallback = |style: &str| {
+        let mut faces = japanese.clone();
+        faces.sort_by_key(|f| (f.family != "BIZ UDPGothic", f.style != style, f.family.contains("Mincho")));
+        faces.into_iter().map(craft_font_name).collect::<Vec<_>>()
+    };
+    let defaults: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut prop = vec!["Inter".to_string()];
-    prop.extend(fallback.clone());
+    prop.extend(defaults.iter().cloned());
+    prop.extend(fallback("Regular"));
     fonts.families.insert(FontFamily::Proportional, prop);
     let mut semi = vec!["Inter-SemiBold".to_string()];
-    semi.extend(fallback);
+    semi.extend(defaults);
+    semi.extend(fallback("Bold"));
     fonts.families.insert(FontFamily::Name(FONT_SEMIBOLD.into()), semi);
-    ctx.set_fonts(fonts);
+    fonts.families.entry(FontFamily::Monospace).or_default().extend(fallback("Regular"));
+    fonts
+}
+
+/// The embedded font families for the About box: Inter, plus the craft-fonts families when built
+/// with them.
+pub fn font_credits() -> String {
+    let mut families = vec!["Inter"];
+    for f in lightcraft_engine::CRAFT_FONTS {
+        if !families.contains(&f.family) {
+            families.push(f.family);
+        }
+    }
+    families.join(" / ")
+}
+
+fn craft_font_name(f: &lightcraft_engine::CraftFont) -> String {
+    format!("craft-fonts {} {}", f.family, f.style)
 }
 
 pub fn apply(ctx: &egui::Context) {

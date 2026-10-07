@@ -13,33 +13,36 @@ use crate::widgets::{divider, register, slider, text_button};
 
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::right("right_panel")
-        .exact_size(t.panel_w)
-        .resizable(false)
-        .frame(egui::Frame::NONE.fill(t.chrome).stroke(egui::Stroke::new(1.0, t.divider)))
-        .show(ui, |ui| {
-            let Some(id) = app.session.active() else {
-                let r = ui.max_rect();
-                super::empty_message(ui, r, "No photo selected", "Select a photo to edit");
-                return;
-            };
-            egui::ScrollArea::vertical().id_salt("right-scroll").auto_shrink([false, false]).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                match app.ui.right {
-                    RightPanel::Edit => super::edit::show(app, ui, id),
-                    RightPanel::Profiles => super::profiles::show(app, ui, id),
-                    RightPanel::Crop => crop(app, ui, id),
-                    RightPanel::Remove => remove(app, ui, id),
-                    RightPanel::Masking => super::masking::show(app, ui, id),
-                    RightPanel::RedEye => red_eye(app, ui, id),
-                    RightPanel::Info => info(app, ui, id),
-                    RightPanel::Keywords => keywords(app, ui, id),
-                    RightPanel::Versions => versions(app, ui, id),
-                    RightPanel::Activity => activity(app, ui, id),
-                    RightPanel::None => {}
-                }
-            });
+    let frame = egui::Frame::NONE.fill(t.chrome).stroke(egui::Stroke::new(1.0, t.divider));
+    // the presets column and the left sidebar are laid out after this panel: leave them their room
+    let reserve = if app.ui.presets { t.panel_w } else { 0.0 } + if app.ui.left_panel { crate::state::LEFT_WIDTH.min } else { 0.0 };
+    let width = app.ui.right_width;
+    let resized = super::resizable_side(ui, false, "right_panel", frame, width, crate::state::RIGHT_WIDTH, reserve, |ui| {
+        let Some(id) = app.session.active() else {
+            let r = ui.max_rect();
+            super::empty_message(ui, r, "No photo selected", "Select a photo to edit");
+            return;
+        };
+        egui::ScrollArea::vertical().id_salt("right-scroll").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            match app.ui.right {
+                RightPanel::Edit => super::edit::show(app, ui, id),
+                RightPanel::Profiles => super::profiles::show(app, ui, id),
+                RightPanel::Crop => crop(app, ui, id),
+                RightPanel::Remove => remove(app, ui, id),
+                RightPanel::Masking => super::masking::show(app, ui, id),
+                RightPanel::RedEye => red_eye(app, ui, id),
+                RightPanel::Info => info(app, ui, id),
+                RightPanel::Keywords => keywords(app, ui, id),
+                RightPanel::Versions => versions(app, ui, id),
+                RightPanel::Activity => activity(app, ui, id),
+                RightPanel::None => {}
+            }
         });
+    });
+    if let Some(w) = resized {
+        app.ui.right_width = w;
+    }
 }
 
 pub fn header(ui: &mut egui::Ui, title: &str) {
@@ -51,7 +54,7 @@ pub fn header(ui: &mut egui::Ui, title: &str) {
 pub fn label_row(ui: &mut egui::Ui, label: &str, value: &str) {
     let t = Tokens::get(ui.ctx());
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-    ui.painter().text(pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, label, t.font(12.5), t.text_dim);
+    ui.painter().text(pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::tr(label), t.font(12.5), t.text_dim);
     ui.painter().text(pos2(r.left() + 110.0, r.center().y), Align2::LEFT_CENTER, value, t.font(12.5), t.text_label);
 }
 
@@ -64,7 +67,7 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     header(ui, "Crop");
     padded(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Aspect Ratio");
+            ui.label(crate::i18n::tr("Aspect Ratio"));
             let cur = d.crop.aspect.map(|(w, h)| format!("{} × {}", w as f64 / 100.0, h as f64 / 100.0)).unwrap_or_else(|| "Free".into());
             let r = ui.add(egui::Button::new(cur).frame(false));
             register(ui.ctx(), "button:cropAspect", r.rect);
@@ -89,25 +92,25 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            if text_button(ui, "cropRotateLeft", "Rotate Left", false).clicked() {
+            if text_button(ui, "cropRotateLeft", crate::i18n::tr("Rotate Left"), false).clicked() {
                 let _ = app.run("photo.rotateLeft", json!({}));
             }
-            if text_button(ui, "cropRotateRight", "Rotate Right", false).clicked() {
+            if text_button(ui, "cropRotateRight", crate::i18n::tr("Rotate Right"), false).clicked() {
                 let _ = app.run("photo.rotateRight", json!({}));
             }
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            if text_button(ui, "cropFlipH", "Flip H", d.crop.flip_h).clicked() {
+            if text_button(ui, "cropFlipH", crate::i18n::tr("Flip H"), d.crop.flip_h).clicked() {
                 let _ = app.run("photo.flipHorizontal", json!({}));
             }
-            if text_button(ui, "cropFlipV", "Flip V", d.crop.flip_v).clicked() {
+            if text_button(ui, "cropFlipV", crate::i18n::tr("Flip V"), d.crop.flip_v).clicked() {
                 let _ = app.run("photo.flipVertical", json!({}));
             }
-            if text_button(ui, "cropSwapAspect", "Swap Aspect (X)", false).clicked() {
+            if text_button(ui, "cropSwapAspect", crate::i18n::tr("Swap Aspect (X)"), false).clicked() {
                 let _ = app.run("crop.rotateAspect", json!({}));
             }
-            if text_button(ui, "cropReset", "Reset", false).clicked() {
+            if text_button(ui, "cropReset", crate::i18n::tr("Reset"), false).clicked() {
                 let _ = app.run("crop.reset", json!({}));
             }
         });
@@ -120,16 +123,19 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     padded(ui, |ui| {
         ui.horizontal(|ui| {
             let on = app.ui.tool == "straighten";
-            if text_button(ui, "straightenTool", "Straighten Tool", on).on_hover_text("Drag along the horizon; double-click for Auto").clicked() {
+            if text_button(ui, "straightenTool", crate::i18n::tr("Straighten Tool"), on)
+                .on_hover_text(crate::i18n::tr("Drag along the horizon; double-click for Auto"))
+                .clicked()
+            {
                 app.ui.tool = if on { String::new() } else { "straighten".into() };
             }
-            if text_button(ui, "straightenAuto", "Auto", false).clicked() {
+            if text_button(ui, "straightenAuto", crate::i18n::tr("Auto"), false).clicked() {
                 let _ = app.run("crop.autoStraighten", json!({}));
             }
         });
     });
     padded(ui, |ui| {
-        ui.label("Overlay");
+        ui.label(crate::i18n::tr("Overlay"));
         {
             use crate::state::CropOverlay as O;
             let opts = [
@@ -146,7 +152,8 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             if let Some(i) = crate::widgets::segmented(ui, "cropOverlay", &items, active, 4) {
                 app.ui.crop_overlay = opts[i].0;
             }
-            if matches!(app.ui.crop_overlay, O::Triangle | O::Spiral) && text_button(ui, "cropOverlayOrient", "Flip Overlay (⇧O)", false).clicked()
+            if matches!(app.ui.crop_overlay, O::Triangle | O::Spiral)
+                && text_button(ui, "cropOverlayOrient", crate::i18n::tr("Flip Overlay (⇧O)"), false).clicked()
             {
                 let _ = app.run("view.cropOverlayOrientation", json!({}));
             }
@@ -155,7 +162,7 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     divider(ui);
     header(ui, "Geometry");
     padded(ui, |ui| {
-        ui.label("Upright");
+        ui.label(crate::i18n::tr("Upright"));
         {
             use lightcraft_develop::Upright;
             let modes = [
@@ -176,30 +183,36 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         }
         let guided = d.geometry.upright == lightcraft_develop::Upright::Guided;
         ui.horizontal_wrapped(|ui| {
-            if !guided && d.geometry.upright != lightcraft_develop::Upright::Off && text_button(ui, "uprightUpdate", "Update", false).clicked() {
+            if !guided
+                && d.geometry.upright != lightcraft_develop::Upright::Off
+                && text_button(ui, "uprightUpdate", crate::i18n::tr("Update"), false).clicked()
+            {
                 let mode = serde_json::to_value(d.geometry.upright).unwrap_or_default();
                 let _ = app.run("geometry.upright", json!({"mode": mode}));
             }
             if guided {
                 let drawing = app.ui.tool == "guidedUpright";
-                if text_button(ui, "uprightDraw", "Draw Guides", drawing).clicked() {
+                if text_button(ui, "uprightDraw", crate::i18n::tr("Draw Guides"), drawing).clicked() {
                     app.ui.tool = if drawing { String::new() } else { "guidedUpright".into() };
                 }
-                if !d.geometry.guides.is_empty() && text_button(ui, "uprightClear", "Clear Guides", false).clicked() {
+                if !d.geometry.guides.is_empty() && text_button(ui, "uprightClear", crate::i18n::tr("Clear Guides"), false).clicked() {
                     let _ = app.run("geometry.guides", json!({"guides": []}));
                 }
             }
         });
         if guided {
             ui.label(
-                egui::RichText::new(format!("{} of 4 guides — drag along lines that should be vertical or horizontal.", d.geometry.guides.len()))
-                    .size(11.0)
-                    .color(Tokens::get(ui.ctx()).text_dim),
+                egui::RichText::new(crate::i18n::tr_format!(
+                    "{} of 4 guides — drag along lines that should be vertical or horizontal.",
+                    d.geometry.guides.len()
+                ))
+                .size(11.0)
+                .color(Tokens::get(ui.ctx()).text_dim),
             );
         }
         ui.add_space(4.0);
         let mut c = d.geometry.constrain_crop;
-        if ui.checkbox(&mut c, "Constrain Crop").changed() {
+        if ui.checkbox(&mut c, crate::i18n::tr("Constrain Crop")).changed() {
             let _ = app.run("develop.merge", json!({"settings": {"geometry": {"constrain_crop": c}}, "label": "Constrain Crop"}));
         }
     });
@@ -222,9 +235,29 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
         });
         ui.add_space(8.0);
-        ui.label(format!("{} spot(s) on this photo", d.spots.len()));
+        ui.label(crate::i18n::tr_format!("{} spot(s) on this photo", d.spots.len()));
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Paint over a distraction on the photo to remove it.").color(Tokens::get(ui.ctx()).text_dim));
+        if text_button(ui, "findDust", crate::i18n::tr("Find Dust Spots"), false)
+            .on_hover_text(crate::i18n::tr("Heal the small, soft dark spots sensor dust leaves on smooth areas"))
+            .clicked()
+        {
+            match app.run("spot.findDust", json!({})) {
+                Ok(r) => {
+                    let n = r["added"].as_u64().unwrap_or(0);
+                    app.toast(
+                        ui.ctx(),
+                        if n == 0 {
+                            "No dust spots found".to_string()
+                        } else {
+                            crate::i18n::tr_format!("Healed {n} dust spot{}", if n == 1 { "" } else { "s" }, n = n)
+                        },
+                    );
+                }
+                Err(e) => app.toast(ui.ctx(), e),
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(crate::i18n::tr("Paint over a distraction on the photo to remove it.")).color(Tokens::get(ui.ctx()).text_dim));
     });
     // brush settings; with a spot selected they edit that spot too
     let sel = app.session.active_spot.and_then(|i| d.spots.get(i).map(|sp| (i, sp.clone())));
@@ -236,7 +269,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             lightcraft_develop::SpotMode::Clone => "Clone",
             lightcraft_develop::SpotMode::Remove => "Remove",
         };
-        super::edit::sub_title(ui, &format!("{mode} spot {} of {}", i + 1, d.spots.len()));
+        super::edit::sub_title(ui, &crate::i18n::tr_format!("{mode} spot {} of {}", i + 1, d.spots.len(), mode = mode));
     }
     let plain = |id: &'static str, label: &'static str, min: f64, max: f64, default: f64| lightcraft_develop::ControlSpec {
         id,
@@ -271,10 +304,10 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if sel.is_some() {
         padded(ui, |ui| {
             ui.horizontal(|ui| {
-                if text_button(ui, "spotRefresh", "Refresh Source (/)", false).clicked() {
+                if text_button(ui, "spotRefresh", crate::i18n::tr("Refresh Source (/)"), false).clicked() {
                     let _ = app.run("spot.refreshSource", json!({}));
                 }
-                if text_button(ui, "spotDelete", "Delete (⌫)", false).clicked() {
+                if text_button(ui, "spotDelete", crate::i18n::tr("Delete (⌫)"), false).clicked() {
                     let _ = app.run("spot.delete", json!({}));
                 }
             });
@@ -283,7 +316,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     // Visualize Spots (A): a black/white high-pass view that makes dust and specks stand out
     padded(ui, |ui| {
         let mut v = app.ui.visualize_spots;
-        if ui.checkbox(&mut v, "Visualize Spots (A)").changed() {
+        if ui.checkbox(&mut v, crate::i18n::tr("Visualize Spots (A)")).changed() {
             app.ui.visualize_spots = v;
         }
     });
@@ -303,7 +336,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         app.ui.spots_threshold = v as f32;
     }
     padded(ui, |ui| {
-        if !d.spots.is_empty() && text_button(ui, "removeClear", "Delete all spots", false).clicked() {
+        if !d.spots.is_empty() && text_button(ui, "removeClear", crate::i18n::tr("Delete all spots"), false).clicked() {
             for i in (0..d.spots.len()).rev() {
                 let _ = app.run("spot.delete", json!({"index": i}));
             }
@@ -324,7 +357,8 @@ fn red_eye(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("Drag over an eye on the photo; the pupil inside is found automatically.").color(Tokens::get(ui.ctx()).text_dim),
+            egui::RichText::new(crate::i18n::tr("Drag over an eye on the photo; the pupil inside is found automatically."))
+                .color(Tokens::get(ui.ctx()).text_dim),
         );
     });
     let n = d.red_eye.len();
@@ -348,16 +382,16 @@ fn red_eye(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     padded(ui, |ui| {
         if eye.pet {
             let mut on = eye.catchlight.is_some();
-            if ui.checkbox(&mut on, "Add Catchlight").changed() {
+            if ui.checkbox(&mut on, crate::i18n::tr("Add Catchlight")).changed() {
                 let _ = app.run("redeye.catchlight", json!({"index": i, "on": on}));
             }
             ui.add_space(4.0);
         }
         ui.horizontal(|ui| {
-            if text_button(ui, "eyeDelete", "Delete", false).clicked() {
+            if text_button(ui, "eyeDelete", crate::i18n::tr("Delete"), false).clicked() {
                 let _ = app.run("redeye.delete", json!({"index": i}));
             }
-            if n > 1 && text_button(ui, "eyeDeleteAll", "Delete all", false).clicked() {
+            if n > 1 && text_button(ui, "eyeDeleteAll", crate::i18n::tr("Delete all"), false).clicked() {
                 for k in (0..n).rev() {
                     let _ = app.run("redeye.delete", json!({"index": k}));
                 }
@@ -373,6 +407,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     padded(ui, |ui| {
         camera_card(ui, &p);
         ui.add_space(6.0);
+        if let Some(why) = &p.preview_only {
+            crate::widgets::preview_only_notice(ui, "info", why);
+            ui.add_space(6.0);
+        }
         if let Some(name) = &p.copy_name {
             let of = p.copy_of.and_then(|m| app.session.catalog.photo(m)).map(|m| m.file_name.clone()).unwrap_or_else(|| "a removed photo".into());
             ui.label(egui::RichText::new(format!("Virtual copy “{name}” of {of}")).color(t.text_label));
@@ -412,6 +450,13 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ("Alt Text", "altText", &m.alt_text, 2),
             ("Extended Description", "extendedDescription", &m.extended_description, 3),
             ("Copyright", "copyright", &m.copyright, 1),
+        ] {
+            meta_field(app, ui, label, key, value, lines);
+        }
+        copyright_status(app, ui, m.copyright_status);
+        for (label, key, value, lines) in [
+            ("Rights Usage Terms", "usageTerms", &m.usage_terms, 2),
+            ("Copyright Info URL", "copyrightUrl", &m.copyright_url, 1),
             ("Creator", "creator", &m.creator, 1),
         ] {
             meta_field(app, ui, label, key, value, lines);
@@ -485,7 +530,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             let pretty = format!("{:.5}° {}, {:.5}° {}", la.abs(), if la >= 0.0 { "N" } else { "S" }, lo.abs(), if lo >= 0.0 { "E" } else { "W" });
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(pretty).size(11.0).color(t.text_dim));
-                if text_button(ui, "showOnMap", "Show on Map", false).on_hover_text("Open the place in OpenStreetMap").clicked() {
+                if text_button(ui, "showOnMap", crate::i18n::tr("Show on Map"), false)
+                    .on_hover_text(crate::i18n::tr("Open the place in OpenStreetMap"))
+                    .clicked()
+                {
                     let url = format!("https://www.openstreetmap.org/?mlat={la:.6}&mlon={lo:.6}#map=15/{la:.6}/{lo:.6}");
                     if let Err(e) = crate::links::open(app, &url) {
                         app.toast(ui.ctx(), e);
@@ -493,10 +541,28 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 }
             });
         }
+        if let Some(a) = p.analysis {
+            let mut line = format!("Focus {:.0}", a.sharpness);
+            if a.clipped > 0.02 {
+                line.push_str(&format!(" · {:.0}% clipped", a.clipped * 100.0));
+            }
+            if a.group.is_some() {
+                line.push_str(if a.best { " · best of its burst" } else { " · in a burst" });
+            }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(line).color(t.text_dim));
+        }
         // offline originals / smart previews
+        // (cached answers, checked off the UI thread: unknown counts as online / no smart preview)
         if let lightcraft_catalog::Source::File { path } = &p.source {
-            let online = std::path::Path::new(path).exists();
-            let smart = lightcraft_engine::cmd::previews::has_smart_preview(&app.session, p.id);
+            let avail = &app.session.media.availability;
+            let online = !avail.is_offline(path);
+            let smart = app
+                .session
+                .media
+                .smart_dir
+                .as_ref()
+                .is_some_and(|d| avail.exists(&d.join(lightcraft_engine::smart::file_name(&p)).to_string_lossy()) == Some(true));
             if !online || smart {
                 let text = match (online, smart) {
                     (false, true) => "Original offline · editing the smart preview",
@@ -508,7 +574,10 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
         }
         ui.add_space(10.0);
-        if text_button(ui, "allMetadata", "All Metadata…", false).on_hover_text("Every EXIF, GPS and XMP field in the file").clicked() {
+        if text_button(ui, "allMetadata", crate::i18n::tr("All Metadata…"), false)
+            .on_hover_text(crate::i18n::tr("Every EXIF, GPS and XMP field in the file"))
+            .clicked()
+        {
             let _ = app.run("dialog.allMetadata", json!({}));
         }
     });
@@ -565,6 +634,21 @@ fn human_size(bytes: u64) -> String {
 
 /// A labelled metadata text field: the typed text lives in egui memory while focused and is
 /// saved (photo.setMeta `key`) when the field loses focus.
+/// Copyright Status: Unknown / Copyrighted / Public Domain (`xmpRights:Marked`).
+fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcraft_catalog::CopyrightStatus) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(egui::RichText::new(crate::i18n::tr("Copyright Status")).size(11.5).color(t.text_dim));
+    let r = egui::ComboBox::from_id_salt("info-copyright-status").selected_text(crate::i18n::tr(current.label())).show_ui(ui, |ui| {
+        for st in lightcraft_catalog::CopyrightStatus::ALL {
+            if ui.selectable_label(st == current, crate::i18n::tr(st.label())).clicked() && st != current {
+                let _ = app.run("photo.setMeta", json!({"copyrightStatus": st.id()}));
+            }
+        }
+    });
+    register(ui.ctx(), "field:copyrightStatus", r.response.rect);
+    ui.add_space(6.0);
+}
+
 fn meta_field(app: &mut LightcraftApp, ui: &mut egui::Ui, label: &str, key: &str, value: &str, lines: usize) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(label).size(11.5).color(t.text_dim));
@@ -591,7 +675,7 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     padded(ui, |ui| {
         let kid = egui::Id::new("kw-input");
         let mut text = ui.data_mut(|d| d.get_temp::<String>(kid).unwrap_or_default());
-        let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("Add keyword").desired_width(f32::INFINITY));
+        let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text(crate::i18n::tr("Add keyword")).desired_width(f32::INFINITY));
         register(ui.ctx(), "field:keyword", r.rect);
         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !text.trim().is_empty() {
             let kws: Vec<String> = text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -609,17 +693,17 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     let _ = app.run("photo.setMeta", json!({"removeKeywords": [k]}));
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Remove from Photo").clicked() {
+                    if ui.button(crate::i18n::tr("Remove from Photo")).clicked() {
                         let _ = app.run("photo.setMeta", json!({"removeKeywords": [k]}));
                     }
-                    if ui.button("Show Photos with Keyword").clicked() {
+                    if ui.button(crate::i18n::tr("Show Photos with Keyword")).clicked() {
                         let _ = app.run("library.filter", json!({"keyword": k}));
                     }
                     ui.separator();
-                    if ui.button("Rename Keyword…").clicked() {
+                    if ui.button(crate::i18n::tr("Rename Keyword…")).clicked() {
                         app.ui.dialog = Some(crate::state::Dialog::RenameKeyword { from: k.clone(), to: k.clone() });
                     }
-                    if ui.button("Delete Keyword").clicked() {
+                    if ui.button(crate::i18n::tr("Delete Keyword")).clicked() {
                         let _ = app.run("keyword.delete", json!({"keyword": k}));
                     }
                 });
@@ -627,6 +711,26 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
         ui.add_space(10.0);
         keyword_set(app, ui, &p.meta.keywords);
+        ui.add_space(8.0);
+        // the painter: click photos in the grid to give them (or take away) a keyword
+        ui.horizontal(|ui| {
+            let pid = egui::Id::new("kw-painter");
+            let painting = app.ui.keyword_painter.clone();
+            let mut k: String = ui.data(|d| d.get_temp(pid)).unwrap_or_else(|| painting.clone().unwrap_or_default());
+            let r = ui.add_enabled(
+                painting.is_none(),
+                egui::TextEdit::singleline(&mut k).hint_text(crate::i18n::tr("Keyword to paint")).desired_width(130.0),
+            );
+            register(ui.ctx(), "field:keywordPainter", r.rect);
+            ui.data_mut(|d| d.insert_temp(pid, k.clone()));
+            let label = if painting.is_some() { "Stop" } else { "Paint" };
+            if text_button(ui, "keywordPaint", label, painting.is_some())
+                .on_hover_text(crate::i18n::tr("Click photos in the grid to toggle the keyword; Esc stops"))
+                .clicked()
+            {
+                let _ = app.run("tool.keywordPainter", json!({"keyword": if painting.is_some() { serde_json::Value::Null } else { json!(k) }}));
+            }
+        });
         ui.add_space(10.0);
         // suggestions: completions of the typed text, else keywords used together with this
         // photo's keywords, else the most used ones
@@ -634,7 +738,7 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         let last = typed.rsplit(',').next().unwrap_or("").trim().to_string();
         let suggestions = (*app.caches.suggestions(&app.session.catalog, &p.meta.keywords, &last, 12)).clone();
         if !suggestions.is_empty() {
-            ui.label(egui::RichText::new("Suggestions").color(t.text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr("Suggestions")).color(t.text_dim));
             ui.horizontal_wrapped(|ui| {
                 for k in suggestions {
                     let r = ui
@@ -659,7 +763,7 @@ fn keyword_set(app: &mut LightcraftApp, ui: &mut egui::Ui, have: &[String]) {
     let sets = lightcraft_engine::cmd::keywords::keyword_sets_json(&app.session);
     let current = sets["current"].as_str().unwrap_or_default().to_string();
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Keyword Set").color(t.text_dim));
+        ui.label(egui::RichText::new(crate::i18n::tr("Keyword Set")).color(t.text_dim));
         egui::ComboBox::from_id_salt("kw-set").selected_text(&current).show_ui(ui, |ui| {
             for set in sets["sets"].as_array().into_iter().flatten() {
                 let name = set["name"].as_str().unwrap_or_default();
@@ -668,7 +772,7 @@ fn keyword_set(app: &mut LightcraftApp, ui: &mut egui::Ui, have: &[String]) {
                 }
             }
             ui.separator();
-            if ui.button("Save Current Keywords as Set…").clicked() {
+            if ui.button(crate::i18n::tr("Save Current Keywords as Set…")).clicked() {
                 app.ui.dialog = Some(crate::state::Dialog::TextPrompt {
                     title: "Save Keyword Set".into(),
                     hint: "Set name".into(),
@@ -678,14 +782,16 @@ fn keyword_set(app: &mut LightcraftApp, ui: &mut egui::Ui, have: &[String]) {
                     key: "name".into(),
                 });
             }
-            if current != lightcraft_engine::cmd::keywords::RECENT && ui.button(format!("Delete “{current}”")).clicked() {
+            if current != lightcraft_engine::cmd::keywords::RECENT
+                && ui.button(crate::i18n::tr_format!("Delete “{current}”", current = current)).clicked()
+            {
                 let _ = app.run("keyword.deleteSet", json!({"name": current}));
             }
         });
     });
     let kws: Vec<String> = sets["keywords"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
     if kws.is_empty() {
-        ui.label(egui::RichText::new("Keywords you add appear here; ⌥1–⌥9 apply them.").color(t.text_dim));
+        ui.label(egui::RichText::new(crate::i18n::tr("Keywords you add appear here; ⌥1–⌥9 apply them.")).color(t.text_dim));
         return;
     }
     let bw = ((ui.available_width() - 8.0) / 3.0).floor().max(40.0);
@@ -715,7 +821,7 @@ fn versions(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     header(ui, "Versions");
     let t = Tokens::get(ui.ctx());
     padded(ui, |ui| {
-        if text_button(ui, "versionCreate", "Create Version", false).clicked() {
+        if text_button(ui, "versionCreate", crate::i18n::tr("Create Version"), false).clicked() {
             let _ = app.run("version.create", json!({}));
         }
         ui.add_space(8.0);
@@ -724,7 +830,7 @@ fn versions(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         let mut auto: bool = ui.data(|d| d.get_temp(tab_id)).unwrap_or(false);
         let named_n = p.versions.iter().filter(|v| !v.auto).count();
         let items = [("Named", "named"), ("Auto", "auto")];
-        let labels = [format!("Named ({named_n})"), format!("Auto ({})", p.versions.len() - named_n)];
+        let labels = [crate::i18n::tr_format!("Named ({named_n})", named_n = named_n), format!("Auto ({})", p.versions.len() - named_n)];
         let items: Vec<(&str, &str)> = items.iter().zip(&labels).map(|((_, k), l)| (l.as_str(), *k)).collect();
         if let Some(i) = crate::widgets::segmented(ui, "versionsTab", &items, Some(auto as usize), 2) {
             auto = i == 1;
@@ -767,7 +873,8 @@ fn versions(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
             // resting on a version shows it in the loupe (nothing is changed)
             if resp.hovered() && !current {
-                app.hover_preview = Some(crate::HoverPreview { label: format!("Version: {}", v.name), settings: (*v.settings).clone() });
+                app.hover_preview =
+                    Some(crate::HoverPreview { label: crate::i18n::tr_format!("Version: {}", v.name), settings: (*v.settings).clone() });
             }
             if resp.double_clicked() {
                 crate::panels::dialogs::prompt(app, "Rename Version", "Version name", &v.name, "version.rename", json!({"index": i}), "name");
@@ -776,20 +883,20 @@ fn versions(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
             resp.on_hover_text(if current { "The photo has these settings" } else { "Click to restore · double-click to rename" }).context_menu(
                 |ui| {
-                    if ui.button("Restore").clicked() {
+                    if ui.button(crate::i18n::tr("Restore")).clicked() {
                         let _ = app.run("version.restore", json!({"index": i}));
                     }
-                    if ui.button("Update with Current Settings").clicked() {
+                    if ui.button(crate::i18n::tr("Update with Current Settings")).clicked() {
                         let _ = app.run("version.update", json!({"index": i}));
                     }
-                    if ui.button("Rename…").clicked() {
+                    if ui.button(crate::i18n::tr("Rename…")).clicked() {
                         crate::panels::dialogs::prompt(app, "Rename Version", "Version name", &v.name, "version.rename", json!({"index": i}), "name");
                     }
-                    if ui.button("Set as Before").clicked() {
+                    if ui.button(crate::i18n::tr("Set as Before")).clicked() {
                         let _ = app.run("beforeAfter.setBefore", json!({"source": "version", "name": v.name}));
                     }
                     ui.separator();
-                    if ui.button("Delete").clicked() {
+                    if ui.button(crate::i18n::tr("Delete")).clicked() {
                         let _ = app.run("version.delete", json!({"index": i}));
                     }
                 },
@@ -819,7 +926,7 @@ fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let t = Tokens::get(ui.ctx());
     padded(ui, |ui| {
         if p.history.is_empty() {
-            ui.label(egui::RichText::new("No edits yet.").color(t.text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr("No edits yet.")).color(t.text_dim));
         }
         for (i, h) in p.history.iter().enumerate().rev() {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
@@ -833,15 +940,15 @@ fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 let _ = app.run("history.restore", json!({"index": i}));
             }
             resp.context_menu(|ui| {
-                if ui.button("Copy History Step Settings to Before").clicked() {
+                if ui.button(crate::i18n::tr("Copy History Step Settings to Before")).clicked() {
                     let _ = app.run("beforeAfter.setBefore", json!({"source": "history", "index": i}));
                 }
-                if ui.button("Create Version from Step").clicked() {
+                if ui.button(crate::i18n::tr("Create Version from Step")).clicked() {
                     let _ = app.run("history.restore", json!({"index": i}));
                     let _ = app.run("version.create", json!({"name": h.label}));
                 }
                 ui.separator();
-                if ui.button("Clear History").clicked() {
+                if ui.button(crate::i18n::tr("Clear History")).clicked() {
                     let _ = app.run("history.clear", json!({}));
                 }
             });

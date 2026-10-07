@@ -93,6 +93,65 @@ pub enum Source {
     Demo { scene: u32 },
 }
 
+/// Copyright status (IPTC / XMP Rights Management `xmpRights:Marked`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CopyrightStatus {
+    /// Not stated (no `xmpRights:Marked`).
+    #[default]
+    Unknown,
+    /// `xmpRights:Marked` = True.
+    Copyrighted,
+    /// `xmpRights:Marked` = False.
+    PublicDomain,
+}
+
+impl CopyrightStatus {
+    pub const ALL: [CopyrightStatus; 3] = [CopyrightStatus::Unknown, CopyrightStatus::Copyrighted, CopyrightStatus::PublicDomain];
+    /// `unknown` / `copyrighted` / `publicDomain` (also `public domain`, `public-domain`).
+    pub fn parse(s: &str) -> Option<CopyrightStatus> {
+        match s.trim().to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
+            "unknown" | "" => Some(CopyrightStatus::Unknown),
+            "copyrighted" => Some(CopyrightStatus::Copyrighted),
+            "publicdomain" => Some(CopyrightStatus::PublicDomain),
+            _ => None,
+        }
+    }
+    /// The id used by commands (`photo.setMeta`'s `copyrightStatus`).
+    pub fn id(self) -> &'static str {
+        match self {
+            CopyrightStatus::Unknown => "unknown",
+            CopyrightStatus::Copyrighted => "copyrighted",
+            CopyrightStatus::PublicDomain => "publicDomain",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyrightStatus::Unknown => "Unknown",
+            CopyrightStatus::Copyrighted => "Copyrighted",
+            CopyrightStatus::PublicDomain => "Public Domain",
+        }
+    }
+    /// As `xmpRights:Marked`: `Some(true)` copyrighted, `Some(false)` public domain.
+    pub fn marked(self) -> Option<bool> {
+        match self {
+            CopyrightStatus::Unknown => None,
+            CopyrightStatus::Copyrighted => Some(true),
+            CopyrightStatus::PublicDomain => Some(false),
+        }
+    }
+    pub fn from_marked(m: Option<bool>) -> CopyrightStatus {
+        match m {
+            None => CopyrightStatus::Unknown,
+            Some(true) => CopyrightStatus::Copyrighted,
+            Some(false) => CopyrightStatus::PublicDomain,
+        }
+    }
+    pub fn is_unknown(&self) -> bool {
+        *self == CopyrightStatus::Unknown
+    }
+}
+
 /// Descriptive + capture metadata.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -115,6 +174,13 @@ pub struct Meta {
     pub alt_text: String,
     pub extended_description: String,
     pub copyright: String,
+    /// Copyright status, rights usage terms and copyright info URL (IPTC Core rights fields).
+    #[serde(skip_serializing_if = "CopyrightStatus::is_unknown")]
+    pub copyright_status: CopyrightStatus,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub usage_terms: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub copyright_url: String,
     pub creator: String,
     pub keywords: Vec<String>,
 }
@@ -197,6 +263,32 @@ pub struct Photo {
     /// unedited, and Reset returns to them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_look: Option<Arc<DevelopSettings>>,
+    /// Assisted culling scores (`None` until analysed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<Analysis>,
+    /// A raw file whose sensor data can't be decoded yet (an unsupported raw variant): why (the
+    /// raw decoder's reason, e.g. "Nikon Huffman-compressed NEF …"). The photo is shown and
+    /// edited from the camera's embedded JPEG preview — a rendered image with the camera's
+    /// picture style baked in — so it is treated as a rendered (non-raw) source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_only: Option<String>,
+    /// A Local record: the fingerprint of its state when the browse catalogued it, to tell
+    /// whether the user changed anything since (see [`crate::local`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_baseline: Option<u64>,
+}
+
+/// What assisted culling measured on a photo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Analysis {
+    /// Focus: 0 (blurred) .. 100 (crisp), from the detail in the photo's sharpest area.
+    pub sharpness: f32,
+    /// Exposure: share of clipped pixels, 0..1 (shadows + highlights).
+    pub clipped: f32,
+    /// Similar-shot group (burst), when the photo has neighbours that look alike.
+    pub group: Option<u32>,
+    /// The best photo of its group.
+    pub best: bool,
 }
 
 impl Photo {
@@ -229,7 +321,20 @@ impl Photo {
             copy_of: None,
             copy_name: None,
             import_look: None,
+            analysis: None,
+            preview_only: None,
+            local_baseline: None,
         }
+    }
+    /// A raw file developed from its sensor data: not a rendered image, and not a raw shown from
+    /// its embedded preview ([`Photo::preview_only`]).
+    pub fn develops_raw(&self) -> bool {
+        self.kind == MediaKind::Raw && self.preview_only.is_none()
+    }
+    /// The current ARW reader has vendor WB multipliers but no measured camera illuminant.
+    /// Use adjustments relative to the camera's as-shot look, as for rendered photographs.
+    pub fn relative_wb(&self) -> bool {
+        self.develops_raw() && self.format.eq_ignore_ascii_case("ARW")
     }
     /// The develop settings import gave this photo: [`Photo::camera_defaults`], or the user's
     /// default preset applied on top of them ([`Photo::import_look`]).
@@ -242,7 +347,8 @@ impl Photo {
     /// The built-in defaults for this photo, before any user default preset: raws start from
     /// their as-shot white balance; embedded lens corrections on when the file has them.
     pub fn camera_defaults(&self) -> DevelopSettings {
-        let mut d = match self.as_shot_wb {
+        let wb = if self.relative_wb() { Some((6500.0, 0.0)) } else { self.as_shot_wb };
+        let mut d = match wb {
             Some((t, tint)) => DevelopSettings::for_raw(t, tint),
             None => DevelopSettings::default(),
         };

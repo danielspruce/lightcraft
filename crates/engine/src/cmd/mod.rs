@@ -5,15 +5,18 @@
 //! `edit.*` (undo/redo), and queries (`catalog.query`, `photo.inspect`, `develop.get`…).
 
 mod before;
-mod browse;
+pub(crate) mod browse;
 mod color;
 pub(crate) mod convert;
+mod cull;
+pub mod curves;
 mod develop;
 mod edit;
 mod export;
 pub mod filters;
 pub mod keywords;
-mod library;
+pub mod library;
+pub mod lut_profiles;
 pub mod manage;
 mod masks;
 mod merge;
@@ -116,11 +119,14 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(library::specs());
         v.extend(develop::specs());
         v.extend(color::specs());
+        v.extend(curves::specs());
         v.extend(masks::specs());
         v.extend(organize::specs());
         v.extend(keywords::specs());
         v.extend(manage::specs());
         v.extend(previews::specs());
+        v.extend(lut_profiles::specs());
+        v.extend(cull::specs());
         v.extend(convert::specs());
         v.extend(convert::edit_specs());
         v.extend(merge::specs());

@@ -33,6 +33,9 @@ fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
         title: m.title.clone().unwrap_or_default(),
         caption: m.caption.clone().unwrap_or_default(),
         copyright: m.copyright.clone().unwrap_or_default(),
+        copyright_status: lightcraft_catalog::CopyrightStatus::from_marked(m.copyright_marked),
+        usage_terms: m.usage_terms.clone().unwrap_or_default(),
+        copyright_url: m.copyright_url.clone().unwrap_or_default(),
         creator: m.artist.clone().unwrap_or_default(),
         keywords: m.keywords.clone(),
     };
@@ -114,6 +117,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
                     as_shot_wb: None,
                     content_hash,
                     xmp: lightcraft_meta::embedded(bytes).xmp,
+                    preview_only: Some(why),
                     ..Default::default()
                 });
             }
@@ -127,7 +131,9 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             std::mem::swap(&mut w, &mut h);
         }
         let (t, tint) = xy_to_temp_tint(lightcraft_raw::color::as_shot_white_xy_of(&raw));
-        let as_shot_wb = Some((t.round(), tint.round()));
+        // Vendor RGB multipliers do not identify an absolute illuminant without camera calibration.
+        let relative = raw.format == lightcraft_raw::RawFormat::Arw && !lightcraft_raw::color::has_matrix(&raw.color);
+        let as_shot_wb = Some(if relative { (6500.0, 0.0) } else { (t.round(), tint.round()) });
         let embedded_lens = embedded_lens(&raw);
         return Ok(ProbeInfo {
             embedded_lens,
@@ -141,6 +147,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             as_shot_wb,
             content_hash,
             xmp: lightcraft_meta::embedded(bytes).xmp,
+            preview_only: None,
         });
     }
     let fmt = lightcraft_codecs::sniff(bytes).ok_or("unrecognized file format")?;
@@ -170,6 +177,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
         content_hash,
         embedded_lens: None,
         xmp: None,
+        preview_only: None,
     })
 }
 
@@ -215,6 +223,9 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
             }
             Err(e) => return Err(e.to_string()),
         };
+        let xy = lightcraft_raw::color::as_shot_white_xy(&raw);
+        let t = lightcraft_raw::color::camera_transform(&raw, xy);
+        let camera_look = crate::camera_preview::fit_preview(&raw, &bytes, &t);
         drop(bytes);
         // Embedded lens corrections are applied by the pipeline ("Enable Profile Corrections"), not baked in.
         let lens = embedded_lens(&raw.info());
@@ -236,21 +247,25 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
         // the samples aren't needed any more (the colour model below reads only the tags)
         raw.data = lightcraft_raw::RawData::U16(Vec::new());
         let mut stages = vec![("develop", t0.elapsed())];
-        let xy = lightcraft_raw::color::as_shot_white_xy(&raw);
-        let t = lightcraft_raw::color::camera_transform(&raw, xy);
         stages.push(("transform", t0.elapsed()));
         lightcraft_raw::highlight::reconstruct(&mut img, t.wb, HIGHLIGHT_CLIP);
         stages.push(("highlights", t0.elapsed()));
-        let m = t.matrix.to_f32();
+        let m = camera_look.map(|p| p.matrix.mul(&t.matrix)).unwrap_or(t.matrix).to_f32();
         let gain = 2f32.powf(t.baseline_exposure as f32);
         let wb = t.wb;
+        // A DNG's own profile look (hue/saturation map, look table), DNG spec chapter 6.
+        let tables = lightcraft_raw::profile::ProfileTables::new(&raw.color.profile, lightcraft_raw::color::illuminant_weight(&raw.color, xy));
         img.map_in_place(|p| {
             let c = [p[0] * wb[0], p[1] * wb[1], p[2] * wb[2]];
-            [
-                ((m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2]) * gain).max(0.0),
-                ((m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2]) * gain).max(0.0),
-                ((m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2]) * gain).max(0.0),
-            ]
+            let rgb = [
+                m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
+                m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
+                m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
+            ];
+            match &tables {
+                Some(tables) => tables.apply(rgb, gain).map(|v| v.max(0.0)),
+                None => rgb.map(|v| (v * gain).max(0.0)),
+            }
         });
         stages.push(("colour", t0.elapsed()));
         let img = fit(&img, max_edge, max_edge, Filter::Box);
@@ -270,13 +285,27 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
             eprintln!("[profile] raw source {}×{} (max {max_edge}, ms after decode): {}", img.width, img.height, parts.join(", "));
         }
         let (temp, tint) = xy_to_temp_tint(xy);
-        return Ok((img, SourceInfo { raw: true, as_shot_temp: temp.round(), as_shot_tint: tint.round(), lens }));
+        let relative = raw.format == lightcraft_raw::RawFormat::Arw && t.matrix_is_fallback;
+        let camera_tone = camera_look.map(|p| p.tone).or_else(|| raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve));
+        let (temp, tint) = if relative { (6500.0, 0.0) } else { (temp.round(), tint.round()) };
+        return Ok((img, SourceInfo { raw: true, as_shot_temp: temp, as_shot_tint: tint, lens, relative_wb: relative, camera_tone }));
     }
     let d = lightcraft_codecs::decode(&bytes, lightcraft_codecs::DecodeOptions::fit(max_edge as u32, max_edge as u32)).map_err(|e| e.to_string())?;
     drop(bytes);
     let img = d.to_working();
     let img = if img.width.max(img.height) > max_edge { fit(&img, max_edge, max_edge, Filter::Mitchell) } else { img };
     Ok((img.into_oriented(Orientation::from_exif(d.orientation)), SourceInfo::default()))
+}
+
+/// A DNG `ProfileToneCurve` (linear in, linear out, 1.0 = white after exposure compensation) as the
+/// finish stage's camera tone curve: 32 knots, log-spaced over 12 stops below white; above white
+/// the camera tone's shoulder continues it.
+pub(crate) fn dng_tone_curve(curve: &lightcraft_raw::profile::ToneCurve) -> Option<lightcraft_pipeline::tone::CameraTone> {
+    let knots: [[f32; 2]; 32] = std::array::from_fn(|i| {
+        let x = 2f32.powf(-12.0 + 12.0 * i as f32 / 31.0);
+        [x, curve.eval(x).min(0.9995)]
+    });
+    lightcraft_pipeline::tone::CameraTone::new(knots)
 }
 
 /// Orientation for an embedded preview: its own EXIF orientation when it has one, else the raw file's.
@@ -384,6 +413,41 @@ mod tests {
         b
     }
 
+    /// Issue #138: a DNG's own profile look (hue/saturation map, look table, tone curve) is
+    /// applied when it's developed — Lightroom-converted DNGs rendered flat and muted without it.
+    #[test]
+    fn dng_profile_look_is_applied() {
+        use lightcraft_raw::profile::{HsvTable, ProfileLook, ToneCurve};
+        let plain = crate::tests_xmp::synthetic_dng_with(None, Default::default());
+        let mut raw = lightcraft_raw::decode(&plain).unwrap();
+        let sat = |img: &Rgb32f| {
+            img.data.iter().map(|p| (p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])) / p[0].max(p[1]).max(p[2]).max(1e-6)).sum::<f32>()
+                / img.data.len() as f32
+        };
+        let (before, info) = load_bytes(&plain, 64).unwrap();
+        assert!(sat(&before) > 0.05, "the synthetic scene is coloured");
+        assert!(info.camera_tone.is_none());
+        // a map that removes all saturation, and a tone curve
+        let grey = HsvTable { hue_divisions: 4, sat_divisions: 2, val_divisions: 1, data: vec![[0.0, 0.0, 1.0]; 8], srgb_value: false };
+        raw.color.profile =
+            ProfileLook { hue_sat_map: [Some(grey), None], look_table: None, tone_curve: ToneCurve::from_tag(&[0.0, 0.0, 0.18, 0.3, 1.0, 1.0]) };
+        let with = lightcraft_raw::write_dng(&raw, &Default::default()).unwrap();
+        let (after, info) = load_bytes(&with, 64).unwrap();
+        assert!(sat(&after) < 1e-3, "saturation {} → {}", sat(&before), sat(&after));
+        // a saturation-only map keeps brightness roughly (HSV value is kept in ProPhoto RGB)
+        let mean = |img: &Rgb32f| img.data.iter().map(|p| p[0].max(p[1]).max(p[2])).sum::<f32>() / img.data.len() as f32;
+        assert!((0.8..1.1).contains(&(mean(&after) / mean(&before))), "{} vs {}", mean(&after), mean(&before));
+        let tone = info.camera_tone.expect("the DNG tone curve becomes the camera tone");
+        assert!((tone.apply(0.18) - 0.3).abs() < 0.01, "{}", tone.apply(0.18));
+        // a look table alone changes the render too (applied after exposure)
+        raw.color.profile = ProfileLook {
+            look_table: Some(HsvTable { hue_divisions: 1, sat_divisions: 2, val_divisions: 1, data: vec![[0.0, 1.0, 0.5]; 2], srgb_value: false }),
+            ..Default::default()
+        };
+        let (dim, _) = load_bytes(&lightcraft_raw::write_dng(&raw, &Default::default()).unwrap(), 64).unwrap();
+        assert!((mean(&dim) / mean(&before) - 0.5).abs() < 0.02, "{} vs {}", mean(&dim), mean(&before));
+    }
+
     #[test]
     fn unsupported_raw_falls_back_to_embedded_preview() {
         let b = cr3_with_preview(48, 32);
@@ -394,6 +458,62 @@ mod tests {
         assert!(!src.raw);
         // no preview at all: a clear error, not a panic
         assert!(load_bytes(b"\0\0\0\x18ftypcrx \0\0\0\x01", 24).is_err());
+    }
+
+    /// Issue #10: a raw variant we can't decode imports as "preview only" with the decoder's
+    /// reason, is rendered as the rendered JPEG it is (not as raw), says so to agents, survives a
+    /// library reopen, and Reload / Relink clear it once the file decodes (undoably).
+    #[test]
+    fn unsupported_raw_imports_as_preview_only_and_survives_reopen() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("lc-preview-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (lib, files) = (dir.join("lib"), dir.join("files"));
+        std::fs::create_dir_all(&files).unwrap();
+        let path = files.join("DSC_0001.cr3");
+        std::fs::write(&path, cr3_with_preview(96, 64)).unwrap();
+        let mut s = crate::Session::new().with_fs();
+        s.open_library(&lib, false).unwrap();
+        // the import review already says so
+        let scan = s.execute("library.importPreview", &json!({"paths": [path.to_string_lossy()]})).unwrap();
+        assert!(scan["candidates"][0]["previewOnly"].as_str().is_some_and(|w| !w.is_empty()), "{scan}");
+        let r = s.execute("library.import", &json!({"paths": [path.to_string_lossy()]})).unwrap();
+        let id = lightcraft_catalog::PhotoId(r["imported"][0].as_u64().unwrap());
+        let p = s.catalog.photo(id).unwrap().clone();
+        let why = p.preview_only.clone().expect("marked preview only");
+        assert!(why.to_uppercase().contains("CR3"), "the decoder's reason: {why}");
+        assert_eq!(p.kind, MediaKind::Raw, "still a raw file (filters, Convert to DNG…)");
+        assert!(!p.develops_raw());
+        // rendered like the JPEG it is: relative white balance, display tone curve, no raw defaults
+        assert_eq!(crate::media::source_info(&p), SourceInfo::default());
+        assert_eq!(*p.develop, lightcraft_develop::DevelopSettings::default());
+        assert!(s.render_job(id, 48, 48, false, true).unwrap().run().rendered.is_ok());
+        // agents see it
+        let q = s.execute("catalog.query", &json!({"filter": {}})).unwrap();
+        assert_eq!(q["photos"][0]["previewOnly"], json!(why), "{q}");
+        let i = s.execute("photo.inspect", &json!({"id": id.0})).unwrap();
+        assert_eq!(i["preview_only"], json!(why), "{i}");
+        // a library reopen keeps it
+        s.persist().unwrap();
+        drop(s);
+        let mut s = crate::Session::new().with_fs();
+        s.open_library(&lib, false).unwrap();
+        assert_eq!(s.catalog.photo(id).unwrap().preview_only.as_deref(), Some(why.as_str()));
+        // the file decodes now (here: replaced by a DNG): Reload clears it, undo brings it back
+        std::fs::write(&path, crate::tests_xmp::synthetic_dng_with(None, lightcraft_meta::Metadata::default())).unwrap();
+        let r = s.execute("photo.reload", &json!({"ids": [id.0]})).unwrap();
+        assert_eq!(r["reloaded"], json!([id.0]), "{r}");
+        assert!(s.catalog.photo(id).unwrap().develops_raw());
+        assert!(crate::media::source_info(s.catalog.photo(id).unwrap()).raw);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.catalog.photo(id).unwrap().preview_only.as_deref(), Some(why.as_str()));
+        // relinking to a file that decodes clears it too
+        let dng = files.join("DSC_0001.dng");
+        std::fs::write(&dng, crate::tests_xmp::synthetic_dng_with(None, lightcraft_meta::Metadata::default())).unwrap();
+        s.execute("photo.relink", &json!({"id": id.0, "path": dng.to_string_lossy()})).unwrap();
+        assert_eq!(s.catalog.photo(id).unwrap().preview_only, None);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -86,6 +86,24 @@ fn render_subcommand() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("unknown control"));
 }
 
+/// Issue #93: `render IMG -o IMG` replaced its own input with the render.
+#[test]
+fn render_refuses_to_overwrite_its_input() {
+    let input = tmp("self-in.png");
+    gradient_png(&input);
+    let before = std::fs::read(&input).unwrap();
+    let dir = input.parent().unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let other_spelling = dir.join("sub/../self-in.png");
+    for out in [&input, &other_spelling] {
+        let o =
+            Command::new(BIN).args(["render", input.to_str().unwrap(), "-o", out.to_str().unwrap(), "--set", "light.exposure=1"]).output().unwrap();
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("never writes over an original"), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    assert_eq!(std::fs::read(&input).unwrap(), before, "the input is untouched");
+}
+
 #[test]
 fn render_export_options() {
     let input = tmp("o-in.png");
@@ -165,6 +183,42 @@ fn snapshot_subcommand_renders_the_ui_headlessly() {
     assert_eq!((d.width, d.height), (640, 480));
 }
 
+/// Issue #136: with the GPU switched off from the environment the UI starts and renders on the CPU,
+/// without creating a GPU device (no driver is loaded), and says why.
+#[test]
+fn snapshot_starts_without_a_gpu() {
+    let script = tmp("nogpu.jsonl");
+    std::fs::write(
+        &script,
+        format!(
+            "{}\n{}\n{}\n",
+            json!({"method": "ui.set", "params": {"view": "photoGrid"}}),
+            json!({"method": "engine.execute", "params": {"command": "app.gpu"}}),
+            json!({"method": "ui.screenshot"}),
+        ),
+    )
+    .unwrap();
+    for (var, value, reason) in [("LIGHTCRAFT_GPU", "0", "LIGHTCRAFT_GPU=0"), ("LIGHTCRAFT_GPU_BACKEND", "off", "LIGHTCRAFT_GPU_BACKEND=off")] {
+        let out = tmp(&format!("nogpu-{var}.png"));
+        let o = Command::new(BIN)
+            .env_remove("LIGHTCRAFT_GPU")
+            .env_remove("LIGHTCRAFT_GPU_BACKEND")
+            .env(var, value)
+            .args(["snapshot", "--demo", "--script", script.to_str().unwrap(), "-o", out.to_str().unwrap(), "--size", "480x320"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{var}: {}", String::from_utf8_lossy(&o.stderr));
+        let replies: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(replies.iter().all(|r| r["ok"] == true), "{replies:?}");
+        let gpu = &replies[1]["result"];
+        assert_eq!(gpu["available"], false, "{var}: {gpu}");
+        assert_eq!(gpu["adapter"], Value::Null, "{var}: no device was created: {gpu}");
+        assert!(gpu["reason"].as_str().is_some_and(|r| r.contains(reason)), "{var}: {gpu}");
+        let d = lightcraft_codecs::decode(&std::fs::read(&out).unwrap(), Default::default()).unwrap();
+        assert_eq!((d.width, d.height), (480, 320));
+    }
+}
+
 fn run_cli(args: &[&str], stdin: Option<&str>) -> (bool, Vec<Value>, String) {
     let mut child = Command::new(BIN).arg("run").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     if let Some(text) = stdin {
@@ -241,4 +295,32 @@ fn devices_are_listed_and_imported_from() {
     let o = Command::new(BIN).args(["run", "library.importPreview", &format!("paths=[\"{dcim}\"]")]).output().unwrap();
     let line: Value = serde_json::from_slice(o.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
     assert_eq!(line["result"]["candidates"].as_array().map(Vec::len), Some(1), "{line}");
+}
+
+/// Issue #99: a library open in one process (here `mcp --library`) is refused by a second one,
+/// with who has it and how to drive the running app instead; free again once the first exits.
+#[test]
+fn a_library_open_in_another_process_is_refused() {
+    let lib = tmp("locked-lib");
+    let _ = std::fs::remove_dir_all(&lib);
+    let lib_s = lib.to_str().unwrap();
+    let mut holder =
+        Command::new(BIN).args(["mcp", "--library", lib_s]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut err = BufReader::new(holder.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("opened library") {
+        line.clear();
+        assert!(err.read_line(&mut line).unwrap() > 0, "mcp exited before opening the library");
+    }
+    let (ok, _, stderr) = run_cli(&["--library", lib_s, "library.info"], None);
+    assert!(!ok);
+    assert!(stderr.contains("already open in lightcraft-cli") && stderr.contains(&format!("process {}", holder.id())), "{stderr}");
+    assert!(stderr.contains("mcp --connect"), "{stderr}");
+
+    drop(holder.stdin.take()); // EOF: the server exits and lets go of the library
+    assert!(holder.wait().unwrap().success());
+    let (ok, lines, stderr) = run_cli(&["--library", lib_s, "library.info"], None);
+    assert!(ok, "{stderr}");
+    assert_eq!(lines[0]["ok"], true);
+    let _ = std::fs::remove_dir_all(&lib);
 }

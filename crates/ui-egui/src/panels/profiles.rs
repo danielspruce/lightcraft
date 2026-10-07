@@ -29,12 +29,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if icon_button(&mut back, "profilesBack", Icon::ChevronLeft, vec2(28.0, 28.0), false, true, "Back to Edit").clicked() {
         app.ui.right = RightPanel::Edit;
     }
-    ui.painter().text(pos2(hr.left() + 46.0, hr.center().y + 2.0), Align2::LEFT_CENTER, "Profiles", t.semibold(15.0), t.text);
+    ui.painter().text(pos2(hr.left() + 46.0, hr.center().y + 2.0), Align2::LEFT_CENTER, crate::i18n::tr("Profiles"), t.semibold(15.0), t.text);
     divider(ui);
     // the applied profile and its amount
     let (cr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let name = profile(&d.profile.id).map(|p| p.name).unwrap_or("Color");
-    ui.painter().text(pos2(cr.left() + 24.0, cr.center().y), Align2::LEFT_CENTER, "Profile", t.font(13.0), t.text_dim);
+    ui.painter().text(pos2(cr.left() + 24.0, cr.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Profile"), t.font(13.0), t.text_dim);
     ui.painter().text(pos2(cr.left() + 84.0, cr.center().y), Align2::LEFT_CENTER, name, t.font(14.0), t.text_label);
     if d.profile.id != "lc.color" {
         super::edit::control(app, ui, &d, "profile.amount", true);
@@ -81,6 +81,20 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         ui.add_space(6.0);
     }
     ui.add_space(30.0);
+    let last_hover_id = egui::Id::new("last-profile-hover");
+    let pointer_in_profiles = ui.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|pos| ui.max_rect().contains(pos));
+    if pointer_in_profiles {
+        if app.hover_preview.is_none()
+            && let Some((saved_id, saved_profile_id)) = ui.data(|m| m.get_temp::<(PhotoId, String)>(last_hover_id))
+            && saved_id == id
+            && let Some(p) = profile(&saved_profile_id)
+        {
+            let s = with_profile(&d, p);
+            app.hover_preview = Some(HoverPreview { label: crate::i18n::tr_format!("Profile: {}", p.name), settings: s });
+        }
+    } else {
+        ui.data_mut(|m| m.remove::<(PhotoId, String)>(last_hover_id));
+    }
 }
 
 /// `d` with profile `p` (at 100 % unless it is the applied one).
@@ -126,7 +140,8 @@ fn cell_ui(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings, id: 
         paint(painter, star.shrink(4.0), if fav { Icon::StarFilled } else { Icon::Star }, if fav || over_star { t.star } else { Color32::WHITE });
     }
     if resp.hovered() && !applied && !over_star {
-        app.hover_preview = Some(HoverPreview { label: format!("Profile: {}", p.name), settings: s.clone() });
+        app.hover_preview = Some(HoverPreview { label: crate::i18n::tr_format!("Profile: {}", p.name), settings: s.clone() });
+        ui.data_mut(|m| m.insert_temp(egui::Id::new("last-profile-hover"), (id, p.id.to_string())));
     }
     let resp = resp.on_hover_text(format!("{} ({})", p.name, p.group));
     if resp.clicked() {
@@ -134,6 +149,7 @@ fn cell_ui(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings, id: 
             let _ = app.run("profile.favorite", json!({"id": p.id}));
         } else if !applied {
             let _ = app.run("develop.profile", json!({"id": p.id, "amount": 100}));
+            ui.data_mut(|m| m.remove::<(PhotoId, String)>(egui::Id::new("last-profile-hover")));
         }
     }
 }

@@ -21,13 +21,17 @@
 //! [`render_cached`] each stage's output is reused while its inputs are unchanged ([`StageCache`]):
 //! dragging a tone, colour or exposure slider re-runs only the per-pixel stage.
 #![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod auto;
 pub mod auto_reference;
 pub mod colorops;
+pub mod cull;
+pub mod dust;
 pub mod finish;
 pub mod geometry;
 pub mod local;
+pub mod lut;
 pub mod masks;
 pub mod optics;
 pub mod output;
@@ -39,7 +43,7 @@ pub mod transform;
 pub mod upright;
 pub mod visualize;
 
-pub use output::{DeepImage, DeepSamples, OutputDepth, OutputSpace, OutputTrc};
+pub use output::{DeepImage, DeepSamples, OutputDepth, OutputSpace, OutputTrc, Proof};
 pub use visualize::{MaskView, Overlay};
 
 use lightcraft_develop::{DevelopSettings, Treatment};
@@ -61,11 +65,14 @@ pub struct SourceInfo {
     pub raw: bool,
     pub as_shot_temp: f64,
     pub as_shot_tint: f64,
+    /// No measured camera illuminant: WB adjustments are relative to the camera's rendered look.
+    pub relative_wb: bool,
+    pub camera_tone: Option<tone::CameraTone>,
 }
 
 impl Default for SourceInfo {
     fn default() -> Self {
-        Self { raw: false, as_shot_temp: 6500.0, as_shot_tint: 0.0, lens: None }
+        Self { raw: false, as_shot_temp: 6500.0, as_shot_tint: 0.0, lens: None, relative_wb: false, camera_tone: None }
     }
 }
 
@@ -91,11 +98,22 @@ pub struct RenderRequest {
     pub space: OutputSpace,
     /// Sample format: 8-bit only, or also a 16-bit / linear float [`Rendered::deep`] (exports).
     pub depth: OutputDepth,
+    /// Soft proofing (CPU only; see [`Proof`]).
+    pub proof: Option<Proof>,
 }
 
 impl RenderRequest {
     pub fn fit(max_w: usize, max_h: usize) -> Self {
-        Self { max_w, max_h, quality: Quality::Full, apply_crop: true, overlay: Overlay::None, space: OutputSpace::Srgb, depth: OutputDepth::U8 }
+        Self {
+            max_w,
+            max_h,
+            quality: Quality::Full,
+            apply_crop: true,
+            overlay: Overlay::None,
+            space: OutputSpace::Srgb,
+            depth: OutputDepth::U8,
+            proof: None,
+        }
     }
 }
 
@@ -396,13 +414,13 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
         c.put(CacheEntry { src: a.clone(), geo, sampled, lin: Some((lin_key, lin)), planes });
     }
     if req.depth != OutputDepth::U8 {
-        let deep = finish::finish_deep(&prep, s, frame, info, req.space, req.depth);
+        let deep = finish::finish_deep(&prep, s, frame, info, req.space, req.depth, req.proof);
         let image = deep.to_rgba8();
         let histogram = Histogram::of_srgb8(&image);
         lap("finish (deep)", &mut t);
         return Rendered { image, histogram, deep: Some(deep) };
     }
-    let image = finish::finish(&prep, s, frame, info, req.space);
+    let image = finish::finish(&prep, s, frame, info, req.space, req.proof);
     lap("finish", &mut t);
     let histogram = Histogram::of_srgb8(&image);
     lap("histogram", &mut t);

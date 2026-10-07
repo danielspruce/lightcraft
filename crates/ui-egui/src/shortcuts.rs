@@ -166,10 +166,14 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
         if let Some(rest) = f.strip_prefix("rate:") {
             let (n, adv) = rest.split_once(':').unwrap_or(("0", "0"));
             cull(app, "photo.rate", json!({"rating": n.parse::<u8>().unwrap_or(0)}), adv == "1");
-            let label = if n == "0" { "Rating cleared".to_string() } else { format!("Rated {}", "★".repeat(n.parse().unwrap_or(0))) };
+            let label =
+                if n == "0" { "Rating cleared".to_string() } else { crate::i18n::tr_format!("Rated {}", "★".repeat(n.parse().unwrap_or(0))) };
             app.toast(ctx, label);
         } else if let Some(l) = f.strip_prefix("label:") {
             cull(app, "photo.label", json!({"label": l}), false);
+        } else if f == "view.softProof" && matches!(app.ui.view, crate::state::ViewMode::PhotoGrid | crate::state::ViewMode::SquareGrid) {
+            // S in a grid: expand / collapse the stack (Lightroom's Library binding)
+            let _ = app.run("stack.toggle", json!({}));
         } else if compare::culling(app) && (f == "library.next" || f == "library.previous") {
             let d = if f == "library.next" { 1 } else { -1 };
             let _ = if app.ui.view == crate::state::ViewMode::Compare { compare::compare_step(app, d) } else { compare::survey_step(app, d) };
@@ -214,7 +218,7 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
             if f == "tool.brush" && matches!(app.ui.view, crate::state::ViewMode::PhotoGrid | crate::state::ViewMode::SquareGrid) {
                 if let Ok(r) = app.run("album.toggleTarget", json!({})) {
                     let n = app.session.targets(&json!({})).len();
-                    let what = if n == 1 { "photo".to_string() } else { format!("{n} photos") };
+                    let what = if n == 1 { "photo".to_string() } else { crate::i18n::tr_format!("{n} photos", n = n) };
                     let name = r["name"].as_str().unwrap_or("Quick Collection").to_string();
                     app.toast(ctx, if r["added"] == true { format!("Added {what} to {name}") } else { format!("Removed {what} from {name}") });
                 }

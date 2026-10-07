@@ -176,3 +176,50 @@ fn stacks_group_collapse_and_replay() {
     assert_eq!(s2.catalog.stacks().count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn album_source_reports_in_library_state_and_persists_the_view() {
+    // An album source made `library.state` panic (serde can't put an integer in an internally
+    // tagged enum) and `view.json` empty, so the view was lost on the next launch.
+    let dir = temp_dir("album-view");
+    let mut s = open(&dir);
+    let id = s.execute("album.create", &json!({"name": "Trip"})).unwrap()["id"].as_u64().unwrap();
+    s.execute("library.source", &json!({"kind": "album", "id": id})).unwrap();
+    s.execute("library.sort", &json!({"key": "fileName"})).unwrap();
+    let st = s.execute("library.state", &json!({})).unwrap();
+    assert_eq!(st["source"], json!({"kind": "album", "id": id}));
+    // the reported source is what `library.source` takes
+    s.execute("library.source", &json!({"kind": "all"})).unwrap();
+    s.execute("library.source", &st["source"]).unwrap();
+    assert_eq!(s.source, LibrarySource::Album(lightcraft_catalog::AlbumId(id)));
+    assert_eq!(s.execute("library.state", &json!({})).unwrap()["source"], json!({"kind": "album", "id": id}));
+    s.close_library().unwrap();
+    drop(s);
+    let s2 = open(&dir);
+    assert_eq!(s2.source, LibrarySource::Album(lightcraft_catalog::AlbumId(id)));
+    assert_eq!(serde_json::to_value(s2.sort).unwrap()["key"], "fileName", "the rest of the view is restored too");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn filter_chips_clear_one_filter_and_total_ignores_the_filter() {
+    let dir = temp_dir("chips");
+    let mut s = open(&dir);
+    let all = s.visible_cloned().len();
+    assert!(all > 1);
+    assert_eq!(s.source_total(), Some(all));
+    s.execute("library.filter", &json!({"rating": 4, "date": "2026-01-16", "text": "x"})).unwrap();
+    // the total is the source's, whatever the filter hides
+    assert_eq!(s.source_total(), Some(all));
+    let chips = crate::filter_chips(&s.filter, &s.catalog);
+    let labels: Vec<&str> = chips.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["Search: “x”", "Rating ≥ 4★", "Date: January 16, 2026"]);
+    // clearing the date chip leaves the other two filters alone
+    s.execute("library.filter", &chips[2].clear).unwrap();
+    assert_eq!(s.filter.date, None);
+    assert_eq!((s.filter.rating, s.filter.text.as_str()), (4, "x"));
+    for c in crate::filter_chips(&s.filter, &s.catalog) {
+        s.execute("library.filter", &c.clear).unwrap();
+    }
+    assert_eq!(s.filter, Default::default());
+}

@@ -70,6 +70,7 @@ pub const FIELDS: &[(&str, &str, Kind)] = &[
     ("location", "Location", Kind::Text),
     ("creator", "Creator", Kind::Text),
     ("copyright", "Copyright", Kind::Text),
+    ("copyrightStatus", "Copyright Status", Kind::Choice(&["copyrighted", "publicDomain", "unknown"])),
     ("captureDate", "Capture Date", Kind::Date),
     ("importDate", "Import Date", Kind::Date),
     ("editDate", "Edit Date", Kind::Date),
@@ -80,6 +81,8 @@ pub const FIELDS: &[(&str, &str, Kind)] = &[
     ("hasGps", "Has GPS", Kind::Bool),
     ("virtualCopy", "Virtual Copy", Kind::Bool),
     ("album", "Album", Kind::Number),
+    ("sharpness", "Focus (assisted culling)", Kind::Number),
+    ("bestOfGroup", "Best of Similar Shots", Kind::Bool),
 ];
 
 /// The operators for a field kind: (id, label).
@@ -309,6 +312,10 @@ impl Rule {
             "location" => text(&[m.location.as_str(), &m.city, &m.state, &m.country].join(" ")),
             "creator" => text(&m.creator),
             "copyright" => text(&m.copyright),
+            "copyrightStatus" => {
+                let want = crate::CopyrightStatus::parse(&want);
+                (want == Some(m.copyright_status)) == (op == "is")
+            }
             "captureDate" => date_op(op, p.captured.as_deref(), value),
             "importDate" => date_op(op, Some(&p.imported), value),
             "editDate" => date_op(op, p.edited.as_deref(), value),
@@ -316,6 +323,8 @@ impl Rule {
             "aperture" => num_op(op, m.aperture.map(|v| v as f64), value),
             "focalLength" => num_op(op, m.focal_mm.map(|v| v as f64), value),
             "megapixels" => num_op(op, Some(p.width as f64 * p.height as f64 / 1e6), value),
+            "sharpness" => num_op(op, p.analysis.map(|a| a.sharpness as f64), value),
+            "bestOfGroup" => p.analysis.is_some_and(|a| a.best || a.group.is_none()) == value.as_bool().unwrap_or(true),
             "album" => {
                 let id = number(value).map(|v| crate::AlbumId(v as u64));
                 id.is_some_and(|a| cat.album(a).is_some_and(|al| !al.is_smart()) && cat.album_contains(a, p)) == (op == "is")
@@ -335,6 +344,15 @@ impl RuleSet {
             Match::Any => self.rules.iter().any(|r| r.matches(p, cat)),
             Match::None => !self.rules.iter().any(|r| r.matches(p, cat)),
         }
+    }
+
+    /// Whether matches depend on the clock ("in the last…" rules, nested groups included): the
+    /// same photos can enter or leave the set without any catalog change.
+    pub fn depends_on_now(&self) -> bool {
+        self.rules.iter().any(|r| match r {
+            Rule::Group { group } => group.depends_on_now(),
+            Rule::Field { op, .. } => op == "inLast" || op == "notInLast",
+        })
     }
 
     /// Unknown fields or operators (for command validation), as readable messages.
@@ -436,6 +454,13 @@ mod tests {
         yes(json!({"rules": [{"field": "captureDate", "op": "between", "value": ["2026-08-01", "2026-08"]}]}));
         no(json!({"rules": [{"field": "captureDate", "op": "after", "value": "2026-08"}]}));
         yes(json!({"rules": [{"field": "kind", "op": "isNot", "value": "video"}, {"field": "edited", "op": "is", "value": false}]}));
+        // copyright status (unknown until set)
+        yes(json!({"rules": [{"field": "copyrightStatus", "op": "is", "value": "unknown"}]}));
+        no(json!({"rules": [{"field": "copyrightStatus", "op": "is", "value": "copyrighted"}]}));
+        let mut pd = photo(2);
+        pd.meta.copyright_status = crate::CopyrightStatus::PublicDomain;
+        assert!(rs(json!({"rules": [{"field": "copyrightStatus", "op": "is", "value": "publicDomain"}]})).matches(&pd, &cat));
+        assert!(rs(json!({"rules": [{"field": "copyrightStatus", "op": "isNot", "value": "copyrighted"}]})).matches(&pd, &cat));
         // nested: rating ≥ 4 and (label is blue or keywords contain food)
         yes(json!({"rules": [{"field": "rating", "op": "gte", "value": 4}, {"group": {"match": "any", "rules": [
             {"field": "label", "op": "is", "value": "blue"}, {"field": "keywords", "op": "contains", "value": "food"}]}}]}));

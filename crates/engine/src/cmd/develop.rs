@@ -126,7 +126,11 @@ pub fn specs() -> Vec<CommandSpec> {
                     }
                 }
                 let label = if vals.len() == 1 { controls::find(&vals[0].0).map(|c| c.label).unwrap_or("Edit").to_string() } else { "Edit".into() };
-                let apply = |d: &mut DevelopSettings| {
+                let apply = |d: &mut DevelopSettings, info: &lightcraft_pipeline::SourceInfo| {
+                    if d.wb.mode == WbMode::AsShot && vals.iter().any(|(k, _)| k == "wb.temp" || k == "wb.tint") {
+                        d.wb.temp = info.as_shot_temp;
+                        d.wb.tint = info.as_shot_tint;
+                    }
                     for (k, v) in &vals {
                         controls::set(d, k, *v);
                         if k == "wb.temp" || k == "wb.tint" {
@@ -141,15 +145,18 @@ pub fn specs() -> Vec<CommandSpec> {
                         .filter_map(|id| s.develop_of(*id).map(|d| (*id, d)))
                         .filter_map(|(id, d)| {
                             let mut d = (*d).clone();
-                            apply(&mut d);
+                            let info = s.source_info(id);
+                            apply(&mut d, &info);
                             s.develop_op(id, d, &label)
                         })
                         .collect();
                     s.commit(&label, Op::Batch { ops })?;
                     return ok();
                 }
+                let id = active(s, "develop.set")?;
+                let info = s.source_info(id);
                 edit(s, "develop.set", &label, |d| {
-                    apply(d);
+                    apply(d, &info);
                     Ok(())
                 })
             }
@@ -158,7 +165,15 @@ pub fn specs() -> Vec<CommandSpec> {
             let c = str_param(p, "control").ok_or_else(|| bad("develop.adjust", "missing control"))?.to_string();
             let spec = controls::find(&c).ok_or_else(|| bad("develop.adjust", "unknown control"))?;
             let delta = f64_req(p, "delta", "develop.adjust")?;
+            let info = s.source_info(active(s, "develop.adjust")?);
             edit(s, "develop.adjust", spec.label, |d| {
+                if c == "wb.temp" || c == "wb.tint" {
+                    if d.wb.mode == WbMode::AsShot {
+                        d.wb.temp = info.as_shot_temp;
+                        d.wb.tint = info.as_shot_tint;
+                    }
+                    d.wb.mode = WbMode::Custom;
+                }
                 let v = controls::get(d, &c).unwrap_or(spec.default);
                 controls::set(d, &c, v + delta);
                 Ok(())
@@ -177,12 +192,18 @@ pub fn specs() -> Vec<CommandSpec> {
             let ops = ids
                 .iter()
                 .filter_map(|id| s.develop_of(*id).map(|d| (*id, d)))
-                .filter_map(|(id, d)| {
+                .filter_map(|(id, _d)| {
                     // back to the photo's import defaults when a default preset gave it its look
                     let look = s.catalog.photo(id).and_then(|p| p.import_look.clone());
                     let fresh = match look {
                         Some(l) => (*l).clone(),
-                        None => DevelopSettings { wb: lightcraft_develop::WhiteBalance { mode: WbMode::AsShot, ..d.wb }, ..Default::default() },
+                        None => {
+                            let info = s.source_info(id);
+                            DevelopSettings {
+                                wb: lightcraft_develop::WhiteBalance { mode: WbMode::AsShot, temp: info.as_shot_temp, tint: info.as_shot_tint },
+                                ..Default::default()
+                            }
+                        }
                     };
                     s.develop_op(id, fresh, "Reset")
                 })
@@ -231,7 +252,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, _| {
                 let id = active(s, "develop.autoBwMix")?;
                 let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.autoBwMix", e))?;
-                let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+                let info = s.source_info(id);
                 let d = s.develop_of(id).unwrap_or_default();
                 let m = lightcraft_pipeline::auto::auto_bw_mix(&src, &info, &d);
                 edit(s, "develop.autoBwMix", "Auto B&W Mix", |d| {
@@ -280,7 +301,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let mode: WbMode =
                     serde_json::from_value(p.get("mode").cloned().unwrap_or(json!("custom"))).map_err(|e| bad("develop.wb", e.to_string()))?;
                 let id = active(s, "develop.wb")?;
-                let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+                let info = s.source_info(id);
                 let (mut t, mut tint) = match mode {
                     WbMode::AsShot => (info.as_shot_temp, info.as_shot_tint),
                     WbMode::Auto => {
@@ -291,7 +312,7 @@ pub fn specs() -> Vec<CommandSpec> {
                         .preset()
                         .map(|(t, ti)| {
                             // presets are relative to daylight for rendered files
-                            if info.raw { (t, ti) } else { (6500.0 * t / 5500.0, ti) }
+                            if info.raw && !info.relative_wb { (t, ti) } else { (6500.0 * t / 5500.0, ti) }
                         })
                         .unwrap_or((info.as_shot_temp, info.as_shot_tint)),
                 };
@@ -312,7 +333,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let (x, y) = (f64_req(p, "x", "develop.wbPick")?, f64_req(p, "y", "develop.wbPick")?);
             let id = active(s, "develop.wbPick")?;
             let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.wbPick", e))?;
-            let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+            let info = s.source_info(id);
             let d = s.develop_of(id).unwrap_or_default();
             // Sample a small neighbourhood in the oriented source.
             let o = src.oriented(d.orientation);
@@ -345,7 +366,7 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("develop.profile", "Set Profile", [], None, "{id: profile id (see profiles.list), amount?: 0..200}", has_active, |s, p| {
             let id = str_param(p, "id").ok_or_else(|| bad("develop.profile", "missing id"))?.to_string();
-            if !crate::presets::PROFILES.iter().any(|x| x.id == id) {
+            if !crate::presets::PROFILES.iter().any(|x| x.id == id) && !s.lut_profiles.iter().any(|x| x.id == id) {
                 return Err(bad("develop.profile", format!("unknown profile `{id}`")));
             }
             edit(s, "develop.profile", "Profile", |d| {
@@ -358,7 +379,7 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("profile.favorite", "Favorite Profile", [], None, "{id, favorite?: bool} (toggles when omitted)", always, |s, p| {
             let id = str_param(p, "id").ok_or_else(|| bad("profile.favorite", "missing id"))?.to_string();
-            if crate::presets::profile(&id).is_none() {
+            if crate::presets::profile(&id).is_none() && !s.lut_profiles.iter().any(|x| x.id == id) {
                 return Err(bad("profile.favorite", format!("unknown profile `{id}`")));
             }
             let on = s.profile_favorites.contains(&id);
@@ -440,7 +461,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, _| {
                 let id = active(s, "crop.autoStraighten")?;
                 let src = s.source_now(id, SourceLevel::Preview).map_err(|e| bad("crop.autoStraighten", e))?;
-                let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+                let info = s.source_info(id);
                 let d = s.develop_of(id).unwrap_or_default();
                 let Some(level) = lightcraft_pipeline::upright::level_degrees(&src, &info, &d) else {
                     return Ok(json!({"changed": false, "reason": "no dominant horizontal or vertical lines"}));
@@ -536,7 +557,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     Upright::Off | Upright::Guided => None,
                     m => {
                         let src = s.source_now(id, SourceLevel::Preview).map_err(|e| bad("geometry.upright", e))?;
-                        let info = s.catalog.photo(id).map(|p| crate::media::source_info(p)).unwrap_or_default();
+                        let info = s.source_info(id);
                         Some(lightcraft_pipeline::upright::auto_transform(&src, &info, &d, m))
                     }
                 };
@@ -671,6 +692,85 @@ pub fn specs() -> Vec<CommandSpec> {
                 let n = ops.len();
                 s.commit("Sync Settings", Op::Batch { ops })?;
                 Ok(json!({"changed": n}))
+            }
+        ),
+        cmd!(
+            "develop.quickAdjust",
+            "Quick Develop",
+            [],
+            None,
+            "{control: develop control id, delta, ids?} — add `delta` to the control on every target photo (each from its own value; Quick Develop) in one undo step → {changed}",
+            has_selection,
+            |s, p| {
+                let c = "develop.quickAdjust";
+                let ctl = str_param(p, "control").ok_or_else(|| bad(c, "missing control"))?.to_string();
+                let spec = controls::find(&ctl).ok_or_else(|| bad(c, format!("unknown control `{ctl}`")))?;
+                let delta = f64_req(p, "delta", c)?;
+                let label = format!("Quick Develop: {}", spec.label);
+                let ops: Vec<Op> = s
+                    .targets(p)
+                    .into_iter()
+                    .filter_map(|id| s.develop_of(id).map(|d| (id, d)))
+                    .filter_map(|(id, d)| {
+                        let mut nd = (*d).clone();
+                        if nd.wb.mode == WbMode::AsShot && (ctl == "wb.temp" || ctl == "wb.tint") {
+                            let info = s.source_info(id);
+                            nd.wb.temp = info.as_shot_temp;
+                            nd.wb.tint = info.as_shot_tint;
+                        }
+                        let v = controls::get(&nd, &ctl).unwrap_or(spec.default);
+                        controls::set(&mut nd, &ctl, v + delta);
+                        if ctl == "wb.temp" || ctl == "wb.tint" {
+                            nd.wb.mode = WbMode::Custom;
+                        }
+                        s.develop_op(id, nd, &label)
+                    })
+                    .collect();
+                let n = ops.len();
+                if n > 0 {
+                    s.commit(&label, Op::Batch { ops })?;
+                }
+                Ok(json!({"changed": n}))
+            }
+        ),
+        cmd!(
+            "develop.matchExposure",
+            "Match Total Exposures",
+            ["Photo"],
+            None,
+            "{ids?} — set each selected photo's Exposure so its total exposure (shutter × ISO ÷ aperture², plus the slider) equals the active photo's; photos without exposure data are skipped → {changed, skipped}",
+            has_selection,
+            |s, p| {
+                let c = "develop.matchExposure";
+                let reference = active(s, c)?;
+                // log2 of the light the photo gathered (shutter s × ISO / f-number²)
+                let gathered = |s: &Session, id: PhotoId| -> Option<f64> {
+                    let m = &s.catalog.photo(id)?.meta;
+                    let t = match m.shutter.split_once('/') {
+                        Some((a, b)) => a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok()?,
+                        None => m.shutter.trim().trim_end_matches('s').trim().parse::<f64>().ok()?,
+                    };
+                    let (n, iso) = (m.aperture? as f64, m.iso? as f64);
+                    (t > 0.0 && n > 0.0 && iso > 0.0).then(|| (t * iso / (n * n)).log2())
+                };
+                let r_ev = gathered(s, reference).ok_or_else(|| bad(c, "the active photo has no shutter / aperture / ISO"))?;
+                let r_slider = s.develop_of(reference).map(|d| d.light.exposure).unwrap_or(0.0);
+                let ids: Vec<PhotoId> = s.targets(p).into_iter().filter(|x| *x != reference).collect();
+                let (mut ops, mut skipped) = (Vec::new(), Vec::new());
+                for id in ids {
+                    let (Some(ev), Some(d)) = (gathered(s, id), s.develop_of(id)) else {
+                        skipped.push(id.0);
+                        continue;
+                    };
+                    let mut nd = (*d).clone();
+                    nd.light.exposure = (r_slider + r_ev - ev).clamp(-5.0, 5.0);
+                    ops.extend(s.develop_op(id, nd, "Match Total Exposures"));
+                }
+                let n = ops.len();
+                if n > 0 {
+                    s.commit("Match Total Exposures", Op::Batch { ops })?;
+                }
+                Ok(json!({"changed": n, "skipped": skipped}))
             }
         ),
         cmd!(

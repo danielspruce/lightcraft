@@ -97,7 +97,7 @@ pub fn expand_preset_paths(paths: &[String]) -> Vec<String> {
             }
         } else {
             let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            if top || ext == LCPRESET_EXT || ["xmp", "lrtemplate", "zip"].contains(&ext.as_str()) {
+            if top || ext == LCPRESET_EXT || ["xmp", "lrtemplate", "zip", "lmp", "mplumpack"].contains(&ext.as_str()) {
                 out.push(p.to_string_lossy().to_string());
             }
         }
@@ -457,14 +457,34 @@ impl Session {
     pub fn profile_menu(&self) -> Value {
         let item =
             |p: &ProfileInfo| json!({"id": p.id, "name": p.name, "group": p.group, "favorite": self.profile_favorites.iter().any(|f| f == p.id)});
-        let list = |ids: &[String]| ids.iter().filter_map(|id| profile(id)).map(item).collect::<Vec<_>>();
+        let lut_item = |id: &str| {
+            self.lut_profiles
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| json!({"id": p.id, "name": p.name, "group": p.group, "favorite": self.profile_favorites.contains(&p.id), "imported": true}))
+        };
+        let list = |ids: &[String]| ids.iter().filter_map(|id| profile(id).map(item).or_else(|| lut_item(id))).collect::<Vec<_>>();
+        let mut groups: Vec<Value> = profile_groups()
+            .into_iter()
+            .map(|g| json!({"name": g, "profiles": PROFILES.iter().filter(|p| p.group == g).map(item).collect::<Vec<_>>()}))
+            .collect();
+        // imported LUT profiles, by their groups
+        let mut lut_groups: Vec<&str> = self.lut_profiles.iter().map(|p| p.group.as_str()).collect();
+        lut_groups.sort_unstable();
+        lut_groups.dedup();
+        for g in lut_groups {
+            let profiles: Vec<Value> = self
+                .lut_profiles
+                .iter()
+                .filter(|p| p.group == g)
+                .map(|p| json!({"id": p.id, "name": p.name, "group": p.group, "favorite": self.profile_favorites.contains(&p.id), "imported": true}))
+                .collect();
+            groups.push(json!({"name": g, "profiles": profiles, "imported": true}));
+        }
         json!({
             "favorites": list(&self.profile_favorites),
             "recent": list(&self.profile_recent),
-            "groups": profile_groups().into_iter().map(|g| json!({
-                "name": g,
-                "profiles": PROFILES.iter().filter(|p| p.group == g).map(item).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
+            "groups": groups,
         })
     }
 }

@@ -96,7 +96,14 @@ pub fn helper_tools(has_ui: bool) -> Vec<Value> {
             "import",
             "Import photos",
             "Add image/raw files to the library. Folders are scanned recursively for photos; relative paths resolve against the server's working directory. The first imported photo becomes active. Returns the new photo ids.",
-            json!({"paths": {"type": "array", "items": {"type": "string"}, "description": "Files and/or folders"}, "album": {"type": "integer", "description": "Also add to this album id"}}),
+            json!({
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files and/or folders"},
+                "album": {"type": "integer", "description": "Also add to this album id"},
+                "mode": {"type": "string", "enum": ["add", "copy", "move"], "description": "add (default) = reference the files in place; copy = copy them into `destination` (default: the library's Originals/); move = as copy, then each original and its XMP sidecars are removed from the source once the copy is verified and catalogued (duplicates and failures keep their sources; `kept` lists sources left in place and why; undo leaves the moved files at the destination)"},
+                "destination": {"type": "string", "description": "Copy or move: destination folder"},
+                "organize": {"type": "string", "description": "Copy or move: folders inside the destination — date (YYYY/YYYY-MM-DD, default), month (YYYY/YYYY-MM), flat, or a folder template such as {date:%Y}/{date:%Y%m%d} (→ 2026/20260114; the template's / make the levels, tokens as for rename; relative, no ..). Dated by capture time, else the import time"},
+                "rename": {"type": "string", "description": "Copy or move: file-name template, e.g. {date:%Y%m%d_%H%M%S}_{seq:3} (run_command photo.renameTokens lists the tags); the extension is kept"}
+            }),
             &["paths"],
         ),
         tool(
@@ -154,7 +161,7 @@ pub fn helper_tools(has_ui: bool) -> Vec<Value> {
         tool(
             "crop",
             "Crop / straighten",
-            "Set the crop of the active photo: `rect` [x0,y0,x1,y1] in normalized coordinates (0..1, origin top-left) of the straightened frame, `angle` in degrees. `reset: true` clears it.",
+            "Set the crop of the active photo: `rect` [x0,y0,x1,y1] in normalized coordinates (0..1, origin top-left) of the straightened frame, `angle` in degrees. `reset: true` clears it. Give at least one of them.",
             json!({"id": photo_id, "rect": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, "angle": {"type": "number"}, "reset": {"type": "boolean"}}),
             &[],
         ),
@@ -192,12 +199,13 @@ pub fn helper_tools(has_ui: bool) -> Vec<Value> {
                 "limitKb": {"type": "integer", "description": "JPEG: largest quality that fits this many KB"},
                 "sharpen": {"type": "string", "enum": ["none", "screen", "matte", "glossy"]},
                 "sharpenAmount": {"type": "string", "enum": ["low", "standard", "high"]},
-                "naming": {"type": "string", "description": "e.g. {name}-{seq}"},
+                "naming": {"type": "string", "description": "File-name template, e.g. {name}-{seq} or {date:%Y-%m-%d}_{title}_{seq:2} (tokens: {name} {num} {seq} {seq:N} {date} {date:%…} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext})"},
+                "startNumber": {"type": "integer", "description": "First {seq} value (default 1)"},
                 "metadata": {"type": "string", "enum": ["all", "allExceptCamera", "copyright", "none"]},
                 "removeLocation": {"type": "boolean"},
                 "colorSpace": {"type": "string", "enum": ["srgb", "displayP3", "adobeRgb", "proPhoto", "rec2020"], "description": "Output colour space (default sRGB; AVIF is always sRGB). adobeRgb = Adobe RGB (1998) compatible; the embedded ICC profile is generated from the published primaries"},
                 "bitDepth": {"type": "integer", "enum": [8, 10, 16, 32], "description": "Bits per channel: PNG 8|16 (default 8), TIFF 8|16|32 (default 16; 32 = linear float with a linear profile), AVIF 8|10; JPEG/WebP are 8-bit"},
-                "watermark": {"description": "Text, or {text, size (fraction of short edge), opacity, anchor (topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight), inset, color [r,g,b], shadow}"}
+                "watermark": {"description": "Text, or {text, vertical (boolean; defaults to false), size (fraction of short edge), opacity, anchor (topLeft|top|topRight|left|center|right|bottomLeft|bottom|bottomRight), inset, color [r,g,b], shadow}"}
             }),
             &[],
         ),
@@ -344,9 +352,9 @@ fn image_result(file: &std::path::Path, max: Option<u32>, format: &str, save_to:
         (bytes, w, h)
     };
     if let Some(p) = save_to
-        && let Err(e) = std::fs::write(p, &bytes)
+        && let Err(e) = lightcraft_engine::export::write_file(p, &bytes)
     {
-        return ToolResult::error(format!("{p}: {e}"));
+        return ToolResult::error(e);
     }
     let mime = if jpeg { "image/jpeg" } else { "image/png" };
     let mut info = meta;
@@ -364,7 +372,18 @@ fn image_result(file: &std::path::Path, max: Option<u32>, format: &str, save_to:
     }
 }
 
+/// A user-given `path` to save to must not be a photo's original (or its sidecar).
+fn check_save_path(b: &mut dyn Backend, args: &Value) -> Result<(), String> {
+    match args.get("path").and_then(Value::as_str) {
+        Some(p) => exec(b, "export.checkTarget", json!({"path": p})).map(|_| ()),
+        None => Ok(()),
+    }
+}
+
 fn render_photo(b: &mut dyn Backend, args: &Value) -> ToolResult {
+    if let Err(e) = check_save_path(b, args) {
+        return ToolResult::error(e);
+    }
     let size = args.get("size").and_then(Value::as_u64).unwrap_or(1024).clamp(16, 4096);
     let id = match args.get("id").and_then(Value::as_u64) {
         Some(id) => Some(id),
@@ -386,6 +405,9 @@ fn render_photo(b: &mut dyn Backend, args: &Value) -> ToolResult {
 }
 
 fn screenshot(b: &mut dyn Backend, args: &Value) -> ToolResult {
+    if let Err(e) = check_save_path(b, args) {
+        return ToolResult::error(e);
+    }
     let file = temp_path("screenshot");
     let path = file.to_string_lossy().to_string();
     match b.call("ui.screenshot", json!({"path": path})) {
@@ -453,8 +475,10 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
                 return ToolResult::error(format!("no photos found in {paths:?}"));
             }
             let mut p = json!({"paths": files});
-            if let Some(a) = args.get("album") {
-                p["album"] = a.clone();
+            for k in ["album", "mode", "destination", "organize", "rename"] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    p[k] = v.clone();
+                }
             }
             ToolResult::from(exec(b, "library.import", p).map(|mut r| {
                 if let Some(o) = r.as_object_mut() {
@@ -515,6 +539,9 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
             }
             None => ToolResult::error("missing `preset`"),
         },
+        "crop" if args.get("rect").is_none() && args.get("angle").is_none() && args.get("reset").and_then(Value::as_bool) != Some(true) => {
+            ToolResult::error("give `rect`, `angle` or `reset: true`")
+        }
         "crop" => ToolResult::from(activate(b, args).and_then(|_| {
             if args.get("reset").and_then(Value::as_bool) == Some(true) {
                 exec(b, "crop.reset", json!({}))
@@ -547,6 +574,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
                         "sharpen",
                         "sharpenAmount",
                         "naming",
+                        "startNumber",
                         "metadata",
                         "removeLocation",
                         "watermark",

@@ -1,11 +1,110 @@
 //! Library commands: view source, filter/sort, selection, ratings/flags/labels, rotate, delete,
 //! metadata, albums, import.
 
-use lightcraft_catalog::{Album, AlbumId, ColorLabel, Flag, GroupBy, Op, PhotoId, Sort, SortKey};
+use lightcraft_catalog::{Album, AlbumId, ColorLabel, CopyrightStatus, Flag, GroupBy, Op, PhotoId, Sort, SortKey};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, bad, bool_or, cmd, has_active, has_selection, ok, str_param};
 use crate::{LibrarySource, Result, Selection, Session};
+
+/// The auto-import folder's visible files with their sizes (the file-system half of
+/// `library.autoImportScan`; the app lists on a worker thread and passes `listing`).
+pub fn list_auto_import_folder(folder: &str) -> std::result::Result<Vec<(String, u64)>, String> {
+    let rd = std::fs::read_dir(folder).map_err(|e| format!("{folder}: {e}"))?;
+    Ok(rd
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter_map(|e| {
+            let m = std::fs::metadata(e.path()).ok()?;
+            m.is_file().then(|| (e.path().to_string_lossy().to_string(), m.len()))
+        })
+        .collect())
+}
+
+/// `library.import`'s params, checked (no file-system calls).
+pub struct ImportRequest {
+    pub paths: Vec<String>,
+    pub opts: crate::import::ImportOptions,
+    pub album: Option<u64>,
+    pub album_name: Option<String>,
+}
+
+/// Parse and check `library.import`'s params (the app's import task runs the import itself, on a
+/// worker thread, with the same options).
+pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
+    let paths = strs(p, "paths");
+    let mode = match str_param(p, "mode").unwrap_or("add") {
+        "add" => crate::import::ImportMode::Add,
+        "copy" => crate::import::ImportMode::Copy,
+        "move" => crate::import::ImportMode::Move,
+        other => return Err(bad("library.import", format!("unknown mode `{other}` (add|copy|move)"))),
+    };
+    let preset = match str_param(p, "preset").filter(|x| !x.is_empty()) {
+        Some(id) => Some(s.presets.iter().find(|x| x.id == id).cloned().ok_or_else(|| bad("library.import", format!("unknown preset `{id}`")))?),
+        None => None,
+    };
+    let album = p.get("album").and_then(Value::as_u64);
+    if let Some(a) = album
+        && s.catalog.album(AlbumId(a)).is_none_or(|al| al.folder || al.is_smart())
+    {
+        return Err(bad("library.import", "album must be a regular album"));
+    }
+    let organize = match str_param(p, "organize") {
+        Some(o) => crate::import::Organize::parse(o).ok_or_else(|| {
+            bad("library.import", format!("unknown organize `{o}` (date|month|flat, or a folder template like {{date:%Y}}/{{date:%Y%m%d}})"))
+        })?,
+        None => Default::default(),
+    };
+    if let crate::import::Organize::Template(t) = &organize
+        && let Some(e) = crate::rename::folder_template_error(t)
+    {
+        return Err(bad("library.import", e));
+    }
+    let metadata_preset = str_param(p, "metadataPreset").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    if let Some(n) = &metadata_preset
+        && !s.metadata_presets.iter().any(|m| m.name.eq_ignore_ascii_case(n))
+    {
+        return Err(bad("library.import", format!("unknown metadata preset `{n}`")));
+    }
+    let opts = crate::import::ImportOptions {
+        mode,
+        preset,
+        keywords: strs(p, "keywords"),
+        destination: str_param(p, "destination").map(str::to_string),
+        organize,
+        rename: str_param(p, "rename").map(str::to_string),
+        rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
+        metadata_preset,
+        convert_dng: bool_or(p, "dng", false),
+        local: bool_or(p, "local", false),
+    };
+    let album_name = str_param(p, "albumName").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    Ok(ImportRequest { paths, opts, album, album_name })
+}
+
+/// After a batch of an import was committed: the album (a new one named `album_name` when there
+/// is no `album` and something was imported) gets the photos. Returns the report as JSON (with
+/// `album`).
+pub fn import_batch_done(s: &mut Session, report: crate::import::ImportReport, mut album: Option<u64>, album_name: Option<&str>) -> Result<Value> {
+    let mut report = serde_json::to_value(report).unwrap_or_default();
+    let imported: Vec<u64> = report["imported"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+    if album.is_none()
+        && let Some(name) = album_name
+        && !imported.is_empty()
+    {
+        let r = s.execute("album.create", &json!({"name": name}))?;
+        album = r["id"].as_u64();
+    }
+    if let Some(a) = album
+        && !imported.is_empty()
+    {
+        // (album.addPhotos wants a selection: the new photos are about to be it)
+        s.selection = Selection::single(PhotoId(imported[0]));
+        s.execute("album.addPhotos", &json!({"id": a, "ids": imported}))?;
+        report["album"] = json!(a);
+    }
+    Ok(report)
+}
 
 fn album_param(p: &Value, key: &str, c: &str) -> Result<AlbumId> {
     p.get(key).and_then(Value::as_u64).map(AlbumId).ok_or_else(|| bad(c, format!("missing album `{key}`")))
@@ -302,13 +401,14 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"selected": s.selection.ids.len()}))
         }),
         cmd!(query "library.devices", "Cameras and Cards", [], None, "{} → [{name, path (its DCIM folder), root}] — mounted volumes with a DCIM folder", always, |_, _| {
-            Ok(serde_json::to_value(crate::devices::devices()).unwrap_or_default())
+            Ok(serde_json::to_value(crate::devices::devices_now()).unwrap_or_default())
         }),
-        cmd!(query "photo.copyMetadata", "Copy Metadata", ["Photo"], None, "{} — title, caption, copyright, creator, location and keywords of the active photo", has_active, |s, _| {
+        cmd!(query "photo.copyMetadata", "Copy Metadata", ["Photo"], None, "{} — title, caption, copyright (notice, status, usage terms, info URL), creator, location and keywords of the active photo", has_active, |s, _| {
             let id = s.active().ok_or_else(|| bad("photo.copyMetadata", "no active photo"))?;
             let m = &s.catalog.photo(id).ok_or_else(|| bad("photo.copyMetadata", "no photo"))?.meta;
             let v = json!({"title": m.title, "caption": m.caption, "altText": m.alt_text, "extendedDescription": m.extended_description,
-                "copyright": m.copyright, "creator": m.creator, "location": m.location, "city": m.city, "state": m.state, "country": m.country,
+                "copyright": m.copyright, "copyrightStatus": m.copyright_status.id(), "usageTerms": m.usage_terms, "copyrightUrl": m.copyright_url,
+                "creator": m.creator, "location": m.location, "city": m.city, "state": m.state, "country": m.country,
                 "keywords": m.keywords});
             s.meta_clipboard = Some(v.clone());
             Ok(v)
@@ -318,7 +418,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Paste Metadata",
             ["Photo"],
             None,
-            "{ids?, fields?: [title|caption|copyright|creator|location|keywords] (default: all copied)}",
+            "{ids?, fields?: [title|caption|copyright|copyrightStatus|usageTerms|copyrightUrl|creator|location|keywords] (default: all copied)}",
             has_selection,
             |s, p| {
                 let c = "photo.pasteMetadata";
@@ -431,7 +531,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Info",
             [],
             None,
-            "{ids?, title?, caption?, altText?, extendedDescription?, copyright?, creator?, location?, city?, state?, country?, gps?: \"lat, lon\" | [lat, lon] | null, keywords?: [..], addKeywords?: [..], removeKeywords?: [..]}",
+            "{ids?, title?, caption?, altText?, extendedDescription?, copyright?, copyrightStatus?: unknown|copyrighted|publicDomain, usageTerms?, copyrightUrl?, creator?, location?, city?, state?, country?, gps?: \"lat, lon\" | [lat, lon] | null, keywords?: [..], addKeywords?: [..], removeKeywords?: [..]}",
             has_selection,
             |s, p| {
                 let strs =
@@ -451,6 +551,13 @@ pub fn specs() -> Vec<CommandSpec> {
                     },
                     Some(_) => return Err(bad("photo.setMeta", "gps is \"lat, lon\", [lat, lon] or null")),
                 };
+                let status = match str_param(p, "copyrightStatus") {
+                    Some(t) => Some(
+                        CopyrightStatus::parse(t)
+                            .ok_or_else(|| bad("photo.setMeta", format!("copyrightStatus `{t}`: unknown, copyrighted or publicDomain")))?,
+                    ),
+                    None => None,
+                };
                 let mut ops = Vec::new();
                 for id in targets {
                     let Some(ph) = s.catalog.photo(id) else { continue };
@@ -458,10 +565,15 @@ pub fn specs() -> Vec<CommandSpec> {
                     if let Some(g) = gps {
                         m.gps = g;
                     }
+                    if let Some(st) = status {
+                        m.copyright_status = st;
+                    }
                     for (k, field) in [
                         ("title", &mut m.title),
                         ("caption", &mut m.caption),
                         ("copyright", &mut m.copyright),
+                        ("usageTerms", &mut m.usage_terms),
+                        ("copyrightUrl", &mut m.copyright_url),
                         ("creator", &mut m.creator),
                         ("location", &mut m.location),
                         ("city", &mut m.city),
@@ -705,9 +817,9 @@ pub fn specs() -> Vec<CommandSpec> {
             "Auto Import Now",
             [],
             None,
-            "{} — add the watched folder's new photos (files the library doesn't have yet; partial / still-copying files wait for the next scan) → {imported, folder}",
+            "{listing?: [[path, size]] (the folder as listed by the caller, e.g. on a worker thread), start?: bool (false: return the `library.import` params as `import` instead of importing)} — add the watched folder's new photos (files the library doesn't have yet; partial / still-copying files wait for the next scan) → {imported, folder, import?}",
             always,
-            |s, _| {
+            |s, p| {
                 let Some(folder) = s.import_defaults.auto_folder.clone() else { return Ok(json!({"imported": [], "folder": null})) };
                 // only files that stopped growing: a file still being written is left for later
                 let known: std::collections::HashSet<String> = s
@@ -718,18 +830,20 @@ pub fn specs() -> Vec<CommandSpec> {
                         _ => None,
                     })
                     .collect();
+                // the folder's files and sizes: listed here, or already listed on a worker thread (the app)
+                let listing: Vec<(String, u64)> = match p.get("listing").and_then(Value::as_array) {
+                    Some(l) => l.iter().filter_map(|e| Some((e.get(0)?.as_str()?.to_string(), e.get(1)?.as_u64()?))).collect(),
+                    None => list_auto_import_folder(&folder).map_err(|e| bad("library.autoImportScan", e))?,
+                };
                 let mut fresh = Vec::new();
-                for e in std::fs::read_dir(&folder).map_err(|e| bad("library.autoImportScan", format!("{folder}: {e}")))?.flatten() {
-                    let path = e.path();
-                    let ps = path.to_string_lossy().to_string();
-                    if !path.is_file() || known.contains(&ps) || path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                for (ps, size) in listing {
+                    if known.contains(&ps) {
                         continue;
                     }
                     // each file is tried once (a non-photo isn't retried every scan)
                     if s.auto_import_seen.get(&ps) == Some(&u64::MAX) {
                         continue;
                     }
-                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                     let seen = s.auto_import_seen.insert(ps.clone(), size);
                     if size > 0 && seen == Some(size) {
                         fresh.push(ps);
@@ -748,6 +862,10 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
                 for f in &fresh {
                     s.auto_import_seen.insert(f.clone(), u64::MAX);
+                }
+                if p.get("start").and_then(Value::as_bool) == Some(false) {
+                    // the caller imports them (the app: on a worker thread)
+                    return Ok(json!({"imported": [], "folder": folder, "import": params}));
                 }
                 let sel = s.selection.clone();
                 let r = s.execute("library.import", &params)?;
@@ -779,7 +897,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Review Import",
             [],
             None,
-            "{paths: [file or folder (recursive)]} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?}], duplicates, scanned} — nothing is added",
+            "{paths: [file or folder (recursive)]} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?, previewOnly?: why a raw can only be shown from its embedded preview}], duplicates, scanned} — nothing is added",
             always,
             |s, p| {
                 let paths = strs(p, "paths");
@@ -793,21 +911,23 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!(
             "library.import",
-            "Add Photos…",
+            "Import Photos",
             ["File"],
             Some("Cmd+Shift+I"),
-            "{paths: [file or folder (recursive)], mode?: add|copy (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/), destination?: folder for copies, organize?: date|month|flat, rename?: file-name template for copies ({name} {seq:N} {date:%Y%m%d} {camera} {title}), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG), autoWithoutXmp?: bool, album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..]} → {imported, duplicates, failed, album?}",
+            "{paths: [file or folder (recursive)], mode?: add|copy|move (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/; move = as copy, then each original and its XMP sidecars are removed from the source — only after the copy is verified (a hard link on the same volume, else copied, synced and compared byte for byte) and its catalog record is saved; failed, duplicate and unchecked files keep their sources; a taken name gets -1, -2…; undo removes the photos from the library but leaves the files at the destination), destination?: folder for copies / moves, organize?: date (YYYY/YYYY-MM-DD) | month (YYYY/YYYY-MM) | flat | a folder template, e.g. `{date:%Y}/{date:%Y%m%d}` → 2026/20260114 (the template's `/` make the folders, each level expanded with the rename tokens and made a safe folder name: never outside the destination; must be relative, no `..`; a level with missing metadata is `unknown`) — dated by capture time, else the import time, rename?: file-name template for copies, original extension added (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each; blank = keep names), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG; copy only), local?: bool (browsing: the photos stay out of the library, like library.browse; not with move), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..], autoWithoutXmp?: bool} → {imported, duplicates, failed, moved?: [{from, to, sidecars?}], kept?: [{path, reason}] (move: sources left in place and why), album?}"
             always,
             |s, p| {
-                let paths = strs(p, "paths");
-                if paths.is_empty() {
+                let req = import_params(s, p)?;
+                if req.paths.is_empty() {
                     return Err(bad("library.import", "no paths"));
                 }
                 let mode = match str_param(p, "mode").unwrap_or("add") {
                     "add" => crate::import::ImportMode::Add,
                     "copy" => crate::import::ImportMode::Copy,
-                    other => return Err(bad("library.import", format!("unknown mode `{other}` (add|copy)"))),
+                    "move" => crate::import::ImportMode::Move,
+                    other => return Err(bad("library.import", format!("unknown mode `{other}` (add|copy|move)"))),
                 };
+                let local = super::bool_or(p, "local", false);
                 let preset = match str_param(p, "preset").filter(|x| !x.is_empty()) {
                     Some(id) => {
                         Some(s.presets.iter().find(|x| x.id == id).cloned().ok_or_else(|| bad("library.import", format!("unknown preset `{id}`")))?)
@@ -841,29 +961,16 @@ pub fn specs() -> Vec<CommandSpec> {
                     rename: str_param(p, "rename").map(str::to_string),
                     rename_start: p.get("renameStart").and_then(Value::as_u64).unwrap_or(1) as usize,
                     metadata_preset,
+                    local,
                     convert_dng: super::bool_or(p, "dng", false),
                     auto_without_xmp: super::bool_or(p, "autoWithoutXmp", false),
                     ..Default::default()
                 };
                 let undo0 = s.undo.len();
-                let mut report = serde_json::to_value(crate::import::import_with(s, &paths, &opts)?).unwrap_or_default();
-                let imported: Vec<u64> = report["imported"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
-                if album.is_none()
-                    && let Some(name) = str_param(p, "albumName").map(str::trim).filter(|n| !n.is_empty())
-                    && !imported.is_empty()
-                {
-                    let r = s.execute("album.create", &json!({"name": name}))?;
-                    album = r["id"].as_u64();
-                }
-                if let Some(a) = album
-                    && !imported.is_empty()
-                {
-                    // (album.addPhotos wants a selection: the new photos are about to be it)
-                    s.selection = Selection::single(PhotoId(imported[0]));
-                    s.execute("album.addPhotos", &json!({"id": a, "ids": imported}))?;
-                    report["album"] = json!(a);
-                }
+                let report = crate::import::import_with(s, &req.paths, &req.opts)?;
+                let report = import_batch_done(s, report, req.album, req.album_name.as_deref())?;
                 // one undo step for the whole import
+                let imported: Vec<u64> = report["imported"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
                 let n = s.undo.len().saturating_sub(undo0);
                 s.merge_undo(n, &format!("Add {} Photo{}", imported.len(), if imported.len() == 1 { "" } else { "s" }));
                 if let Some(f) = imported.first() {
@@ -907,6 +1014,14 @@ pub fn specs() -> Vec<CommandSpec> {
                 "logRecords": j.log_records(),
                 "logBytes": j.log_bytes(),
                 "lastError": lib.last_error,
+                // settings files that were unreadable or damaged at open (kept, defaults used)
+                "settingsWarnings": lib.settings_warnings,
+                // changes applied in memory whose write failed (retried by every save)
+                "unsavedOps": s.unsaved().map_or(0, |u| u.0),
+                "unsavedError": s.unsaved().map(|u| u.1),
+                // untouched Local records forgotten when the library opened
+                "forgotLocal": lib.forgot_local.as_ref().map(|p| json!({"forgotten": p.evict.len(), "local": p.local, "keptRecent": p.kept_recent, "keptTouched": p.kept_touched, "keptInUse": p.kept_in_use})),
+                "persistence": j.stats(),
                 "cache": cache,
                 "load": {
                     "created": lib.report.created,

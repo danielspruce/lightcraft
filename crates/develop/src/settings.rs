@@ -786,6 +786,9 @@ pub enum MaskShape {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaskComponent {
+    /// A name given in the Masking panel (Rename); `None` shows the shape's kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub op: MaskOp,
     #[serde(default)]
@@ -802,11 +805,18 @@ pub struct Mask {
     pub invert: bool,
     pub components: Vec<MaskComponent>,
     pub adjust: LocalAdjustments,
+    /// Refine Edges 0..100: the mask's edges snap to the photo's (guided filter).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub refine: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 impl Default for Mask {
     fn default() -> Self {
-        Self { id: 0, name: "Mask 1".into(), visible: true, invert: false, components: Vec::new(), adjust: LocalAdjustments::default() }
+        Self { id: 0, name: "Mask 1".into(), visible: true, invert: false, components: Vec::new(), adjust: LocalAdjustments::default(), refine: 0.0 }
     }
 }
 

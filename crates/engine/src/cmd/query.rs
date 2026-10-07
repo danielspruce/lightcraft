@@ -26,6 +26,8 @@ pub fn photo_summary(p: &Photo) -> Value {
         "deleted": p.deleted,
         "copyOf": p.copy_of.map(|c| c.0),
         "copyName": p.copy_name,
+        // an undecodable raw variant, shown and edited from its embedded JPEG: why
+        "previewOnly": p.preview_only,
     })
 }
 
@@ -111,7 +113,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 .map(|r| json!({"group": r.group, "tag": r.tag, "name": r.name, "value": r.value}))
                 .collect();
             // XMP: the sidecar if there is one, else the file's own packet
-            let packet = crate::sidecar::read_packet(path, ph.kind, s.xmp.naming).map(|(x, _)| x).or_else(|| lightcraft_meta::embedded(&bytes).xmp);
+            let packet = crate::sidecar::read_packet(path, ph.kind, s.sidecar_naming(ph.id)).map(|(x, _)| x).or_else(|| lightcraft_meta::embedded(&bytes).xmp);
             let xmp: Vec<Value> = packet
                 .and_then(|x| lightcraft_meta::parse_xmp(&x).ok())
                 .map(|d| d.properties.into_iter().filter(|(k, _)| !k.starts_with("lc:")).map(|(k, v)| json!({"name": k, "value": v.join("; ")})).collect())
@@ -184,11 +186,17 @@ pub fn specs() -> Vec<CommandSpec> {
                 "versions": ph.versions.iter().map(|v| json!({"name": v.name, "created": v.created})).collect::<Vec<_>>(),
             }))
         }),
-        cmd!(query "app.gpu", "GPU Rendering", [], None, "{enabled?: bool} — allow/forbid GPU rendering (CPU fallback; LIGHTCRAFT_GPU=0 forbids it for the process)", always, |_, p| {
+        cmd!(query "app.gpu", "GPU Rendering", [], None, "{enabled?: bool} — allow/forbid GPU rendering (CPU fallback; LIGHTCRAFT_GPU=0 forbids it for the process); returns {enabled, available, adapter, reason (why the GPU is off), lastFallback (latest render redone on the CPU, and why)}", always, |_, p| {
             if let Some(on) = p.get("enabled").and_then(Value::as_bool) {
                 lightcraft_gpu::set_enabled(on);
             }
-            Ok(json!({"enabled": lightcraft_gpu::enabled(), "available": lightcraft_gpu::available(), "adapter": lightcraft_gpu::adapter_name()}))
+            Ok(json!({
+                "enabled": lightcraft_gpu::enabled(),
+                "available": lightcraft_gpu::available(),
+                "adapter": lightcraft_gpu::adapter_name(),
+                "reason": lightcraft_gpu::unavailable_reason(),
+                "lastFallback": lightcraft_gpu::last_fallback(),
+            }))
         }),
         cmd!(query "library.memory", "Memory Usage", [], None, "{} — bytes held by each cache (decoded sources, rendered previews, GPU buffers; heap when instrumented)", always, |s, _| {
             Ok(serde_json::to_value(s.memory_report()).unwrap_or_default())

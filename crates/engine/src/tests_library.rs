@@ -52,6 +52,57 @@ fn edits_survive_restart_without_close() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Compaction at the threshold runs on a worker thread (issue #37): commands go on (and stay
+/// durable) meanwhile, the frame loop's `persist_if_dirty` finishes it, and a crash at any time
+/// keeps every command.
+#[test]
+fn threshold_compaction_runs_in_the_background() {
+    let dir = temp_dir("bg-compact");
+    let mut s = open(&dir, true);
+    s.library.as_mut().unwrap().journal_mut().policy = lightcraft_catalog::SnapshotPolicy { max_records: 8, max_bytes: u64::MAX };
+    let ids: Vec<_> = s.catalog.photos().map(|p| p.id).collect();
+    let mut background = 0;
+    for k in 0..60usize {
+        s.selection = crate::Selection::single(ids[k % ids.len()]);
+        s.execute("photo.rate", &json!({"rating": k % 6})).unwrap();
+        if s.execute("library.info", &json!({})).unwrap()["persistence"]["snapshotRunning"].as_bool().unwrap() {
+            background += 1;
+        }
+        if k == 30 {
+            // a crash while a compaction may be in flight
+            let expect = s.catalog.to_snapshot();
+            let copy = temp_dir("bg-compact-crash");
+            std::fs::create_dir_all(&copy).unwrap();
+            for f in ["catalog.snap", "catalog.log"] {
+                if dir.join(f).exists() {
+                    std::fs::copy(dir.join(f), copy.join(f)).unwrap();
+                }
+            }
+            let s2 = open(&copy, true);
+            assert_eq!(s2.catalog.to_snapshot(), expect);
+            let _ = std::fs::remove_dir_all(&copy);
+        }
+    }
+    assert!(background > 0, "compactions ran in the background");
+    for _ in 0..10_000 {
+        s.persist_if_dirty();
+        if !s.library.as_ref().unwrap().journal().snapshot_running() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let info = s.execute("library.info", &json!({})).unwrap();
+    let p = &info["persistence"];
+    assert!(p["snapshots"].as_u64() >= Some(2) && p["lastSnapshot"]["background"] == true, "{p}");
+    // the log holds exactly the records after the snapshot
+    assert_eq!(info["logRecords"].as_u64().unwrap(), info["seq"].as_u64().unwrap() - info["snapshotSeq"].as_u64().unwrap(), "{info}");
+    let expect = s.catalog.to_snapshot();
+    drop(s); // no close: like a crash
+    let s2 = open(&dir, true);
+    assert_eq!(s2.catalog.to_snapshot(), expect);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn close_writes_snapshot_and_view_state() {
     let dir = temp_dir("close");
@@ -62,6 +113,7 @@ fn close_writes_snapshot_and_view_state() {
     let expect = s.catalog.to_snapshot();
     s.close_library().unwrap();
     assert_eq!(std::fs::metadata(dir.join("catalog.log")).unwrap().len(), 0);
+    drop(s); // one session per library (issue #99)
 
     let s2 = open(&dir, true);
     let r = &s2.library.as_ref().unwrap().report;
@@ -121,6 +173,13 @@ fn new_library_without_seed_is_empty_and_compacts() {
     let info = s.execute("library.info", &json!({})).unwrap();
     assert_eq!(info["logRecords"], 0);
     assert_eq!(info["snapshotSeq"], info["seq"]);
+    // persistence timings (issue #37): the append and the compaction were measured
+    let p = &info["persistence"];
+    assert!(p["appends"].as_u64() >= Some(1), "{p}");
+    assert!(p["snapshots"].as_u64() >= Some(1), "{p}");
+    assert!(p["lastSnapshot"]["bytes"].as_u64() > Some(0), "{p}");
+    assert!(p["lastSnapshot"]["totalMs"].as_f64() >= p["lastSnapshot"]["serializeMs"].as_f64(), "{p}");
+    drop(s); // one session per library (issue #99)
     let s2 = open(&dir, true);
     assert_eq!(s2.catalog.len(), 0, "an existing library is never seeded");
     assert_eq!(s2.catalog.albums().count(), 1);
@@ -318,4 +377,33 @@ fn scale_100k_library_queries() {
     });
     worst.sort_by(|a, b| b.1.total_cmp(&a.1));
     eprintln!("slowest: {:?}", &worst[..3]);
+}
+
+/// Issue #99: a library is open in one session at a time. A second opener is refused (nothing
+/// read or written), the owning session can reopen it, and it is free again once closed.
+#[test]
+fn a_library_open_elsewhere_is_refused() {
+    let dir = temp_dir("locked");
+    let mut s = open(&dir, true);
+    s.execute("photo.rate", &json!({"rating": 3})).unwrap();
+    let log = std::fs::read(dir.join("catalog.log")).unwrap();
+
+    let mut other = Session::new();
+    let e = other.open_library(&dir, true).unwrap_err();
+    assert!(matches!(e, crate::EngineError::LibraryInUse(_)), "{e:?}");
+    assert!(e.to_string().contains("already open in"), "{e}");
+    assert!(other.library.is_none());
+    assert_eq!(std::fs::read(dir.join("catalog.log")).unwrap(), log, "the refused opener wrote nothing");
+
+    // the session that has it open may reopen it (Settings → Open Library on the same folder)
+    s.close_library().unwrap();
+    s.open_library(&dir, true).unwrap();
+    assert!(other.open_library(&dir, true).is_err(), "still locked after reopening");
+    s.execute("photo.rate", &json!({"rating": 4})).unwrap();
+    let expect = s.catalog.to_snapshot();
+
+    drop(s);
+    other.open_library(&dir, true).unwrap();
+    assert_eq!(other.catalog.to_snapshot(), expect);
+    let _ = std::fs::remove_dir_all(&dir);
 }

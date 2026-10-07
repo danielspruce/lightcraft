@@ -56,6 +56,16 @@ pub fn evaluate_one(m: &Mask, frame: &Frame, w: usize, h: usize, img: &Rgb32f, l
         }
         first = false;
     }
+    if m.refine > 0.0 {
+        // Refine Edges: the mask's edges follow the photo's (window up to ~4 % of the long edge,
+        // the width of a soft brush edge or gradient)
+        let k = (m.refine / 100.0).clamp(0.0, 1.0) as f32;
+        let sigma = (0.04 * w.max(h) as f32 * k).max(1.0);
+        let refined = guided_cross(log_l, &alpha, sigma, 0.02);
+        for (a, r) in alpha.data.iter_mut().zip(&refined.data) {
+            *a += (r - *a) * k.sqrt();
+        }
+    }
     if m.invert {
         alpha.data.iter_mut().for_each(|v| *v = 1.0 - *v);
     }
@@ -354,7 +364,7 @@ mod tests {
         let shape = MaskShape::Radial { center: Point::new(0.5, 0.5), rx: 0.2, ry: 0.2, angle: 0.0, feather: 20.0, invert: false };
         let a = shape_alpha(&shape, &f, 100, 100, &img, &l, 0.0);
         assert!(a.get(50, 50) > 0.99 && a.get(5, 5) < 0.01);
-        let m = Mask { components: vec![MaskComponent { op: MaskOp::Add, invert: true, shape }], ..Default::default() };
+        let m = Mask { components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: true, shape }], ..Default::default() };
         let e = evaluate(&[m], &f, 100, 100, &img, &l, 0.0);
         assert!(e[0].alpha.get(50, 50) < 0.01);
     }
@@ -367,7 +377,7 @@ mod tests {
         let stroke = BrushStroke { points: vec![Point::new(0.1, 0.5), Point::new(0.9, 0.5)], size: 0.05, ..Default::default() };
         let erase = BrushStroke { points: vec![Point::new(0.5, 0.5)], size: 0.05, erase: true, feather: 0.0, ..Default::default() };
         let m = Mask {
-            components: vec![MaskComponent { op: MaskOp::Add, invert: false, shape: MaskShape::Brush { strokes: vec![stroke, erase] } }],
+            components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: false, shape: MaskShape::Brush { strokes: vec![stroke, erase] } }],
             ..Default::default()
         };
         let e = evaluate(&[m], &f, 200, 100, &img, &l, 0.0);
@@ -406,5 +416,31 @@ mod tests {
         let a = shape_alpha(&comp(true), &f, w, h, &flat, &fl, 0.0);
         let b = shape_alpha(&comp(false), &f, w, h, &flat, &fl, 0.0);
         assert!((a.get(94, 50) - b.get(94, 50)).abs() < 0.02, "{} vs {}", a.get(94, 50), b.get(94, 50));
+    }
+
+    /// Refine Edges: a soft mask over a hard edge in the photo snaps to that edge.
+    #[test]
+    fn refine_edges_follows_the_photo() {
+        let (w, h) = (120usize, 80usize);
+        // left half dark, right half bright
+        let img = Rgb32f::from_fn(w, h, |x, _| if x < 60 { [0.05; 3] } else { [0.6; 3] });
+        let log_l = Plane::from_fn(w, h, |x, _| if x < 60 { (0.05f32).log2() } else { (0.6f32).log2() });
+        let f = Frame::new(w, h, &Default::default(), true);
+        let soft = Mask {
+            components: vec![MaskComponent {
+                name: None,
+                op: MaskOp::Add,
+                invert: false,
+                shape: MaskShape::Linear { start: Point::new(0.75, 0.5), end: Point::new(0.25, 0.5) },
+            }],
+            ..Default::default()
+        };
+        let refined = Mask { refine: 100.0, ..soft.clone() };
+        let step = |m: &Mask| {
+            let a = evaluate_one(m, &f, w, h, &img, &log_l, 0.0);
+            a.data[40 * w + 63] - a.data[40 * w + 56]
+        };
+        let (plain, sharp) = (step(&soft), step(&refined));
+        assert!(sharp > plain * 1.5 && sharp > 0.1, "the edge in the mask follows the photo's: {plain} → {sharp}");
     }
 }

@@ -304,19 +304,13 @@ fn apply_auto(s: &mut DevelopSettings, src: &Rgb32f, info: &SourceInfo) {
     s.color.saturation = a.saturation;
 }
 
-/// A free file name `dir/<stem>-<suffix>.dng` (`-2`, `-3`… when taken).
-fn output_path(first: &str, suffix: &str) -> String {
+/// `dir/<stem>-<suffix>.dng`, then `-2`, `-3`… (the candidates for a merge's output).
+fn output_names(first: &str, suffix: &str) -> impl Iterator<Item = std::path::PathBuf> {
     let p = std::path::Path::new(first);
     let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
     let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Merge".into());
-    for k in 1.. {
-        let name = if k == 1 { format!("{stem}-{suffix}.dng") } else { format!("{stem}-{suffix}-{k}.dng") };
-        let cand = dir.join(name);
-        if !cand.exists() {
-            return cand.to_string_lossy().to_string();
-        }
-    }
-    unreachable!()
+    let suffix = suffix.to_string();
+    (1u64..).map(move |k| dir.join(if k == 1 { format!("{stem}-{suffix}.dng") } else { format!("{stem}-{suffix}-{k}.dng") }))
 }
 
 /// Parse `merge.*` command parameters into a kind and finishing options.
@@ -371,8 +365,11 @@ impl Session {
     /// apply Auto Settings / the auto crop. Returns `{id, path, …info}`.
     pub fn finish_merge(&mut self, job: &MergeJob, out: MergeOutput) -> Result<Value> {
         let first = &job.sources.first().ok_or_else(|| EngineError::Other("nothing merged".into()))?.1;
-        let path = output_path(first, job.kind.suffix());
-        std::fs::write(&path, &out.dng).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        // a new file under a free name (never replacing one), complete and synced before it appears
+        let path = lightcraft_catalog::safe_file::write_new_unique(&mut output_names(first, job.kind.suffix()), &out.dng)
+            .map_err(|e| EngineError::Other(format!("could not write the merged DNG next to {first}: {e}")))?
+            .to_string_lossy()
+            .to_string();
         let report = crate::import::import(self, std::slice::from_ref(&path), crate::import::ImportMode::Add)?;
         let id = report
             .imported

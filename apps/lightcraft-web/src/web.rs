@@ -15,37 +15,53 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use crate::backend::Backend;
+use crate::backup::{ACTIVE_LIBRARY, DEFAULT_LIBRARY_DIR, valid_library_dir};
 use crate::bench::Bench;
 use crate::files::{Files, FlushOp, LIBRARY_FILES};
+use crate::safety::{self, notice};
 use crate::store::{Originals, content_hash, download_name, storage_key};
 use crate::wire::ThumbIndex;
 use crate::workers::{THUMB_INDEX, Workers};
 
 const ACCEPT: &str = ".jpg,.jpeg,.png,.tif,.tiff,.webp,.dng,.cr2,.nef,.arw,.psd,.jxl,.gif,.bmp";
 
-/// Where the library files live in browser storage.
-const LIBRARY_DIR: &str = "library";
+/// After a failed save, wait this long before trying again (ms).
+const SAVE_RETRY_MS: f64 = 2000.0;
+
+/// How long a notice stays on screen (s).
+const NOTICE_SECS: f64 = 8.0;
 
 /// How often view state, UI prefs and the thumbnail index are saved (ms).
 const SAVE_EVERY_MS: f64 = 1000.0;
 
-fn window() -> web_sys::Window {
-    web_sys::window().expect("no window")
+/// The page's window (`None` only outside a browser page, e.g. in a worker).
+fn window() -> Option<web_sys::Window> {
+    web_sys::window()
 }
 
 /// Milliseconds since navigation start.
 fn perf_now() -> f64 {
-    window().performance().map(|p| p.now()).unwrap_or(0.0)
+    window().and_then(|w| w.performance()).map(|p| p.now()).unwrap_or(0.0)
 }
 
 fn set_status(text: &str) {
-    if let Some(el) = window().document().and_then(|d| d.get_element_by_id("lightcraft_status")) {
+    if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("lightcraft_status")) {
         el.set_text_content(Some(text));
     }
 }
 
-fn library_key(name: &str) -> String {
-    format!("{LIBRARY_DIR}/{name}")
+/// Storage key of library file `name` in library folder `dir`.
+fn library_key(dir: &str, name: &str) -> String {
+    format!("{dir}/{name}")
+}
+
+/// Repaint the app (notices from async tasks).
+pub(crate) fn request_repaint() {
+    CTX.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.request_repaint();
+        }
+    });
 }
 
 /// URL options (`?bench&store=idb&workers=2&reset`).
@@ -59,7 +75,7 @@ struct Options {
 
 impl Options {
     fn from_url() -> Options {
-        let q = window().location().search().unwrap_or_default();
+        let q = window().and_then(|w| w.location().search().ok()).unwrap_or_default();
         let params: Vec<(String, String)> = q
             .trim_start_matches('?')
             .split('&')
@@ -85,8 +101,9 @@ async fn store_file(originals: Originals, backend: Option<Backend>, name: String
     if let Some(b) = &backend
         && let Err(e) = b.write(&storage_key(&hash), &bytes).await
     {
-        // still importable for this session; it won't survive a reload
-        log::error!("storing {name} in browser storage failed: {e}");
+        // a photo whose bytes aren't stored would be gone after a reload: don't add it
+        notice(format!("{name} was not added: browser storage refused it ({e}). Free up space or back up and clear old photos."));
+        return;
     }
     originals.added(&name, &hash, Arc::from(bytes));
     ctx.request_repaint();
@@ -102,7 +119,7 @@ async fn read_file(originals: Originals, backend: Option<Backend>, file: web_sys
 
 /// Show the browser's open dialog; picked files are imported asynchronously.
 fn open_picker(originals: Originals, backend: Option<Backend>, ctx: egui::Context) {
-    let Some(doc) = window().document() else { return };
+    let Some(doc) = window().and_then(|w| w.document()) else { return };
     let Ok(input) = doc.create_element("input").map(|e| e.unchecked_into::<web_sys::HtmlInputElement>()) else { return };
     input.set_type("file");
     input.set_multiple(true);
@@ -131,7 +148,7 @@ fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
     opts.set_type(crate::store::mime_for(name));
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&arr, &opts).map_err(e)?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(e)?;
-    let doc = window().document().ok_or("no document")?;
+    let doc = window().and_then(|w| w.document()).ok_or("no document")?;
     let a: web_sys::HtmlAnchorElement = doc.create_element("a").map_err(e)?.unchecked_into();
     a.set_href(&url);
     a.set_download(name);
@@ -140,20 +157,59 @@ fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
     let revoke = Closure::once_into_js(move || {
         let _ = web_sys::Url::revoke_object_url(&url);
     });
-    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 5000);
+    if let Some(w) = window() {
+        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 5000);
+    }
     log::info!("exported {name} ({} bytes)", bytes.len());
     Ok(())
 }
 
-fn services(originals: Originals, backend: Option<Backend>, ctx: egui::Context) -> Services {
+fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen: Rc<Cell<bool>>, ctx: egui::Context) -> Services {
+    let (backup_backend, backup_files) = (backend.clone(), files);
+    let restore_backend = backend.clone();
     Services {
+        backup_library: Some(Box::new(move |session: &mut Session| {
+            let Some(b) = backup_backend.clone() else { return Err("nothing is stored in this browser session (?store=memory)".into()) };
+            // the photos' own names for the originals in the zip
+            let names: std::collections::HashMap<String, String> = session
+                .catalog
+                .photos()
+                .filter_map(|p| match &p.source {
+                    Source::File { path } => crate::store::hash_of_path(path).map(|h| (h.to_string(), p.file_name.clone())),
+                    _ => None,
+                })
+                .collect();
+            let files = backup_files.clone();
+            notice("Backing up the library… (the download starts when it's ready)");
+            wasm_bindgen_futures::spawn_local(async move {
+                match safety::backup(files, b, names).await {
+                    Ok((n, bytes)) => notice(format!(
+                        "Library backed up: {n} original{} ({:.1} MB). Keep the file somewhere safe.",
+                        if n == 1 { "" } else { "s" },
+                        bytes / 1e6
+                    )),
+                    Err(e) => notice(format!("Backup failed: {e}")),
+                }
+            });
+            Ok(json!({"started": true}))
+        })),
+        restore_library: Some(Box::new(move |_session: &mut Session| {
+            let Some(b) = restore_backend.clone() else { return Err("nothing is stored in this browser session (?store=memory)".into()) };
+            let frozen = frozen.clone();
+            // once the backup is in place, stop saving the old library (the page reloads)
+            safety::pick_and_restore(b, move || frozen.set(true));
+            Ok(json!({"started": true}))
+        })),
         pick_files: Some(Box::new(move || {
             open_picker(originals.clone(), backend.clone(), ctx.clone());
             Vec::new() // files arrive asynchronously and are imported on a later frame
         })),
         // Preset files: browser pickers are asynchronous; not wired on the web yet.
         pick_preset_files: None,
+        pick_tracklog: None,
         save_preset_file: None,
+        pick_curve_preset_files: None,
+        save_curve_preset_file: None,
         write: Some(Box::new(download)),
         // downloads happen on the main thread: exports run in the foreground on the web
         write_shared: None,
@@ -170,21 +226,29 @@ fn services(originals: Originals, backend: Option<Backend>, ctx: egui::Context) 
     }
 }
 
-/// Write dirty library files to storage, in order, until none are left.
-async fn flush(files: Files, backend: Backend, flushing: Rc<Cell<bool>>) {
+/// Write dirty library files to storage, in order, until none are left. A failure (quota,
+/// storage cleared) is recorded in `files` — the catalog then reports changes as unsaved instead
+/// of accepting them silently — and retried after [`SAVE_RETRY_MS`].
+async fn flush(files: Files, backend: Backend, dir: String, flushing: Rc<Cell<bool>>, failed_at: Rc<Cell<f64>>) {
     'outer: loop {
         let ops = files.take_dirty();
         if ops.is_empty() {
+            if files.error().is_some() {
+                log::info!("lightcraft: saving works again");
+            }
+            files.set_error(None);
             break;
         }
         for (i, op) in ops.iter().enumerate() {
             let r = match op {
-                FlushOp::Write { name, data } => backend.write(&library_key(name), data).await,
-                FlushOp::Append { name, offset, data } => backend.write_at(&library_key(name), Some(*offset), data).await,
+                FlushOp::Write { name, data } => backend.write(&library_key(&dir, name), data).await,
+                FlushOp::Append { name, offset, data } => backend.write_at(&library_key(&dir, name), Some(*offset), data).await,
             };
             if let Err(e) = r {
                 log::error!("saving {} failed: {e}", op.name());
                 files.failed(&ops[i..]);
+                files.set_error(Some(e));
+                failed_at.set(perf_now());
                 break 'outer;
             }
         }
@@ -198,6 +262,8 @@ struct Boot {
     backend: Option<Backend>,
     files: Files,
     index: ThumbIndex,
+    /// The library folder in storage (`library`, or a restored backup's).
+    lib_dir: String,
 }
 
 async fn boot(opts: Options) -> Boot {
@@ -215,15 +281,32 @@ async fn boot(opts: Options) -> Boot {
     };
     let files = Files::default();
     let mut index = ThumbIndex::default();
+    let mut lib_dir = DEFAULT_LIBRARY_DIR.to_string();
     if let Some(b) = &backend {
         if opts.reset {
-            match b.clear().await {
-                Ok(()) => log::info!("lightcraft: storage cleared (?reset)"),
-                Err(e) => log::error!("clearing storage: {e}"),
+            // everything this site keeps in the browser, photos included: never without asking
+            let ok = safety::confirm(
+                "?reset deletes the LightCraft library stored in this browser, including every imported photo. \
+                 This can't be undone. Delete it?",
+            );
+            if ok {
+                match b.clear().await {
+                    Ok(()) => log::info!("lightcraft: storage cleared (?reset)"),
+                    Err(e) => log::error!("clearing storage: {e}"),
+                }
+            } else {
+                log::info!("lightcraft: ?reset declined; storage kept");
+            }
+        }
+        // a restored backup lives in its own folder (see `backup`)
+        if let Ok(Some(d)) = b.read(ACTIVE_LIBRARY).await {
+            let d = String::from_utf8_lossy(&d).trim().to_string();
+            if valid_library_dir(&d) {
+                lib_dir = d;
             }
         }
         for name in LIBRARY_FILES {
-            match b.read(&library_key(name)).await {
+            match b.read(&library_key(&lib_dir, name)).await {
                 Ok(Some(data)) => files.preload(name, data),
                 Ok(None) => {}
                 Err(e) => log::error!("reading {name}: {e}"),
@@ -232,7 +315,14 @@ async fn boot(opts: Options) -> Boot {
         if let Ok(Some(j)) = b.read(THUMB_INDEX).await {
             index = ThumbIndex::from_json(&j);
         }
-        crate::backend::request_persistence();
+        crate::backend::request_persistence(|granted| {
+            if !granted {
+                notice(
+                    "This browser may delete LightCraft's library when it runs short of space (persistent storage wasn't granted). \
+                     Keep your original photos elsewhere and use File ▸ Back Up Library… now and then.",
+                );
+            }
+        });
         // thumbnails stored without an index entry (index saved late, or lost): delete them
         let b2 = b.clone();
         let known: std::collections::HashSet<String> = b
@@ -260,7 +350,7 @@ async fn boot(opts: Options) -> Boot {
         index.len(),
         index.total() as f64 / 1e6
     );
-    Boot { opts, backend, files, index }
+    Boot { opts, backend, files, index, lib_dir }
 }
 
 struct WebApp {
@@ -270,6 +360,11 @@ struct WebApp {
     backend: Option<Backend>,
     workers: Option<Workers>,
     flushing: Rc<Cell<bool>>,
+    /// When the last save to storage failed (ms; 0 = never).
+    flush_failed_at: Rc<Cell<f64>>,
+    /// Saving stopped (a restored backup is about to replace this library: the page reloads).
+    frozen: Rc<Cell<bool>>,
+    lib_dir: String,
     bench: Option<Bench>,
     first_frame_logged: bool,
     last_save: f64,
@@ -278,17 +373,18 @@ struct WebApp {
 
 impl WebApp {
     fn new(cc: &eframe::CreationContext<'_>, boot: Boot) -> Self {
-        let Boot { opts, backend, files, index } = boot;
+        let Boot { opts, backend, files, index, lib_dir } = boot;
         let originals = Originals::default();
         let t = perf_now();
         let mut session = Session::new();
         originals.install(&mut session);
         let stores = LibraryStores {
-            dir: format!("browser:{}/{LIBRARY_DIR}", backend.as_ref().map_or("memory", |b| b.kind())).into(),
+            dir: format!("browser:{}/{lib_dir}", backend.as_ref().map_or("memory", |b| b.kind())).into(),
             catalog: Box::new(files.store()),
             files: Box::new(files.store()),
             on_disk: false,
         };
+        let mut problem = None;
         match session.open_library_in(stores, true).cloned() {
             Ok(r) => log::info!(
                 "lightcraft: library {} in {:.0} ms ({} photos; snapshot seq {}, {} ops replayed)",
@@ -299,21 +395,37 @@ impl WebApp {
                 r.replayed
             ),
             Err(e) => {
-                log::error!("opening the library failed: {e}; starting a temporary one");
-                session = Session::with_demo();
+                // never a silent demo session (issue #100): an empty one, and the window says why
+                log::error!("opening the library failed: {e}");
+                session = Session::new();
                 originals.install(&mut session);
+                problem = Some(lightcraft_ui_egui::panels::library_problem::LibraryProblem {
+                    can_retry: false,
+                    ..lightcraft_ui_egui::panels::library_problem::LibraryProblem::new(
+                        "the browser's storage for this page",
+                        format!("{e}. Reload the page to try again."),
+                    )
+                });
             }
+        }
+        if backend.is_some() {
+            notice(
+                "LightCraft in the browser is experimental. Your library is kept in this browser's storage: keep your original photos \
+                 elsewhere and back up with File ▸ Back Up Library….",
+            );
         }
         // previews are large (≤ 2560 px, f32): keep few in a 32-bit address space
         session.media.preview_capacity = 3;
-        let mut app = LightcraftApp::new(session, services(originals.clone(), backend.clone(), cc.egui_ctx.clone()));
+        let frozen = Rc::new(Cell::new(false));
+        let mut app = LightcraftApp::new(session, services(originals.clone(), backend.clone(), files.clone(), frozen.clone(), cc.egui_ctx.clone()));
         let ui_written = files.get("ui.json").unwrap_or_default();
         if let Ok(ui) = serde_json::from_slice::<UiState>(&ui_written) {
             app.ui = ui;
         }
         app.ui = app.ui.sanitized();
+        app.library_problem = problem;
         let n = opts.workers.unwrap_or_else(|| {
-            let cores = window().navigator().hardware_concurrency() as usize;
+            let cores = window().map_or(1, |w| w.navigator().hardware_concurrency() as usize);
             cores.saturating_sub(1).clamp(1, 4)
         });
         let workers =
@@ -331,6 +443,9 @@ impl WebApp {
             backend,
             workers,
             flushing: Rc::new(Cell::new(false)),
+            flush_failed_at: Rc::new(Cell::new(0.0)),
+            frozen,
+            lib_dir,
             bench: opts.bench.then(|| Bench::new(origin)),
             first_frame_logged: false,
             last_save: 0.0,
@@ -392,6 +507,9 @@ impl WebApp {
 
     /// Save view state, UI prefs and the thumbnail index now and then; flush dirty files.
     fn save(&mut self) {
+        if self.frozen.get() {
+            return;
+        }
         let now = perf_now();
         if now - self.last_save >= SAVE_EVERY_MS {
             self.last_save = now;
@@ -413,12 +531,16 @@ impl WebApp {
                 });
             }
         }
+        // after a failure, retry every couple of seconds rather than every frame
+        let backing_off = self.files.error().is_some() && now - self.flush_failed_at.get() < SAVE_RETRY_MS;
         if let Some(b) = &self.backend
             && self.files.is_dirty()
             && !self.flushing.get()
+            && !backing_off
         {
             self.flushing.set(true);
-            wasm_bindgen_futures::spawn_local(flush(self.files.clone(), b.clone(), self.flushing.clone()));
+            let (files, dir, flushing, failed_at) = (self.files.clone(), self.lib_dir.clone(), self.flushing.clone(), self.flush_failed_at.clone());
+            wasm_bindgen_futures::spawn_local(flush(files, b.clone(), dir, flushing, failed_at));
         }
     }
 }
@@ -448,8 +570,10 @@ impl WebApp {
         let (orig_n, orig_bytes) = self.originals.usage();
         json!({
             "storage": self.backend.as_ref().map_or("memory", |b| b.kind()),
+            "library": self.lib_dir,
             "dirty": self.files.is_dirty(),
             "flushing": self.flushing.get(),
+            "saveError": self.files.error(),
             "workers": {"alive": alive, "ready": ready, "remoteJobs": remote, "inlineJobs": inline},
             "originalsInMemory": orig_n,
             "originalBytesInMemory": orig_bytes,
@@ -474,6 +598,10 @@ impl WebApp {
 
 impl eframe::App for WebApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        for text in safety::take_notices() {
+            let now = ctx.input(|i| i.time);
+            self.app.ui.toast = Some((text, now + NOTICE_SECS));
+        }
         self.run_inbox();
         self.import_dropped(ctx);
         self.load_originals(ctx);
@@ -511,11 +639,22 @@ impl eframe::App for WebApp {
 #[wasm_bindgen]
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    safety::install_panic_hook();
     log::info!("lightcraft: wasm instantiated at {:.0} ms", perf_now());
     let opts = Options::from_url();
     wasm_bindgen_futures::spawn_local(async move {
-        let Some(canvas) =
-            window().document().and_then(|d| d.get_element_by_id("lightcraft_canvas")).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        // one tab per library: two would each keep their own copy and overwrite each other's saves
+        if opts.store != "memory" && safety::acquire_tab_lock().await == Some(false) {
+            safety::show_blocking(
+                "LightCraft is already open in another tab or window of this browser.\n\n\
+                 Switch to that tab, or close it and reload this page. (Two tabs would overwrite each other's changes.)",
+            );
+            return;
+        }
+        let Some(canvas) = window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("lightcraft_canvas"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         else {
             log::error!("missing <canvas id=\"lightcraft_canvas\">");
             return;
@@ -525,7 +664,7 @@ pub fn start() {
         let r = runner.start(canvas, eframe::WebOptions::default(), Box::new(move |cc| Ok(Box::new(WebApp::new(cc, boot))))).await;
         match r {
             Ok(()) => {
-                if let Some(el) = window().document().and_then(|d| d.get_element_by_id("lightcraft_loading")) {
+                if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("lightcraft_loading")) {
                     el.remove();
                 }
             }

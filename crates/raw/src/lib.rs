@@ -8,16 +8,18 @@
 //!   [`RawImage::develop`] does all of it plus `OpcodeList3` and the default crop; [`RawImage::develop_binned`]
 //!   produces the same at 1/k of the size straight from the mosaic (previews, thumbnails).
 //! - [`color`] implements the DNG colour model (dual-illuminant interpolation, forward matrices, white balance)
-//!   and produces camera → linear Rec.2020 D65 matrices.
+//!   and produces camera → linear Rec.2020 D65 matrices; [`profile`] reads and applies a DNG's own profile
+//!   look tables and tone curve.
 //!
 //! Formats: DNG (uncompressed, lossless JPEG, lossy JPEG (Smart Previews), Deflate incl. floating point, tiled/stripped, CFA and LinearRaw),
-//! Canon CR2, Nikon NEF/NRW (uncompressed), Sony ARW (uncompressed, ARW2, lossless), Fujifilm RAF (uncompressed Bayer
+//! Canon CR2, Nikon NEF/NRW (uncompressed, Huffman lossless / lossy compressed), Sony ARW (uncompressed, ARW2, lossless), Fujifilm RAF (uncompressed Bayer
 //! and X-Trans), Panasonic RW2 (packed 12/14-bit), Pentax PEF (uncompressed, Huffman), Olympus ORF (uncompressed).
-//! [`embedded_preview`] covers all of them plus CR3. Variants we can't decode yet (Nikon Huffman NEF, Panasonic
-//! quantised RW2, compressed ORF/RAF, CR3) return [`RawError::Unsupported`]; each vendor module documents its sources
+//! [`embedded_preview`] covers all of them plus CR3. Variants we can't decode yet (Nikon "lossy after split" NEF,
+//! Panasonic quantised RW2, compressed ORF/RAF, CR3) return [`RawError::Unsupported`]; each vendor module documents its sources
 //! (public specifications, tag-name documentation, black-box analysis of CC0 samples) and gaps. Non-DNG files carry no
 //! colour matrix: [`color`] falls back to a documented neutral model. The decoders never panic on malformed input.
 #![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod binned;
 pub mod color;
@@ -28,6 +30,7 @@ pub mod highlight;
 pub mod ljpeg;
 pub mod opcodes;
 mod preview;
+pub mod profile;
 mod tiffraw;
 mod unpack;
 mod vendor;
@@ -266,6 +269,11 @@ impl Cfa {
             .collect::<Option<_>>()?;
         (p.len() == 4).then_some(Cfa { width: 2, height: 2, pattern: p })
     }
+    /// A 2×2 Bayer layout named in code (`"RGGB"`, `"BGGR"`, `"GRBG"`, `"GBRG"`). Only for literal
+    /// names (tested below); anything else falls back to RGGB instead of failing.
+    pub(crate) fn bayer_static(s: &'static str) -> Cfa {
+        Cfa::bayer(s).unwrap_or(Cfa { width: 2, height: 2, pattern: vec![0, 1, 1, 2] })
+    }
     /// The Fujifilm X-Trans 6×6 layout (as commonly documented), anchored at (0, 0).
     pub fn xtrans() -> Cfa {
         let rows = ["GGRGGB", "GGBGGR", "BRGRBG", "GGBGGR", "GGRGGB", "RBGBRG"];
@@ -387,6 +395,10 @@ pub struct ColorData {
     pub as_shot_white_xy: Option<Xy>,
     /// EV to add for a "normal" rendering (`BaselineExposure` + `BaselineExposureOffset`).
     pub baseline_exposure: f64,
+    /// The file's own camera-profile look (`ProfileHueSatMap*`, `ProfileLookTable*`,
+    /// `ProfileToneCurve`), applied by [`color`]'s users at render time.
+    #[serde(default)]
+    pub profile: profile::ProfileLook,
 }
 
 /// A decoded raw image.
@@ -575,6 +587,9 @@ mod tests {
         assert_eq!(c.shifted(1, 0).name(), "GRBG");
         assert_eq!(c.shifted(1, 1).name(), "BGGR");
         assert!(Cfa::bayer("RGGX").is_none());
+        for name in ["RGGB", "BGGR", "GRBG", "GBRG"] {
+            assert_eq!(Cfa::bayer_static(name).name(), name);
+        }
         let x = Cfa::xtrans();
         assert!(!x.is_bayer());
         let greens = x.pattern.iter().filter(|&&p| p == 1).count();

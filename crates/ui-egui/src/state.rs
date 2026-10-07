@@ -14,6 +14,8 @@ pub enum ViewMode {
     Compare,
     /// The selected photos tiled.
     Survey,
+    /// A reference photo (left, fixed) beside the active photo (right, being edited).
+    Reference,
 }
 
 /// The right-hand tool/panel shown next to the tool strip.
@@ -170,15 +172,50 @@ impl Default for AppSettings {
 /// Preview sizes offered in Settings → Performance.
 pub const PREVIEW_EDGES: [u32; 4] = [1600, 2560, 3840, 5120];
 
+/// Click-zoom ratios offered (percent): 1:1, 2:1, 3:1, 4:1, 8:1.
+pub const CLICK_ZOOMS: [u32; 5] = [100, 200, 300, 400, 800];
+
+/// Width limits of a side panel the user resizes (points).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelWidth {
+    pub min: f32,
+    pub default: f32,
+    pub max: f32,
+}
+
+impl PanelWidth {
+    /// `w` within the limits (the default when it isn't a number).
+    pub fn clamp(&self, w: f32) -> f32 {
+        if w.is_finite() { w.clamp(self.min, self.max) } else { self.default }
+    }
+}
+
+/// The left sidebar (sources, albums, folders).
+pub const LEFT_WIDTH: PanelWidth = PanelWidth { min: 200.0, default: 268.0, max: 480.0 };
+/// The right panel (Edit, Masking, Info, …).
+pub const RIGHT_WIDTH: PanelWidth = PanelWidth { min: 250.0, default: 270.0, max: 520.0 };
+/// The photo area the side panels always leave free (as far as their minimum widths allow).
+pub const MIN_PHOTO_WIDTH: f32 = 360.0;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
+    #[serde(default = "crate::i18n::default_language")]
+    pub language: crate::i18n::Language,
     /// The Build Previews run last announced (its identity, finished?).
     #[serde(skip)]
     pub preview_build_seen: Option<(usize, bool)>,
+    /// Saving the library is failing (announced with a toast; the top bar shows a warning until
+    /// a later save succeeds).
+    #[serde(skip)]
+    pub unsaved_seen: bool,
     pub view: ViewMode,
     pub left_panel: bool,
     pub right: RightPanel,
+    /// Widths of the left sidebar and of the right panel in points (dragging their inner edge
+    /// resizes them; within [`LEFT_WIDTH`] / [`RIGHT_WIDTH`]).
+    pub left_width: f32,
+    pub right_width: f32,
     /// Presets column open (opens to the left of the Edit panel).
     pub presets: bool,
     /// Presets column: show a live thumbnail of the photo with each preset.
@@ -187,6 +224,12 @@ pub struct UiState {
     pub zoom: Zoom,
     /// Pan offset of the loupe when zoomed (image-normalized centre).
     pub pan: (f32, f32),
+    /// Zoom applied by a click on the image (and Z / Space), in percent (100 = 1:1, 200 = 2:1);
+    /// one of [`CLICK_ZOOMS`].
+    pub click_zoom: u32,
+    /// Animate the loupe rect toward its target (set by a click-zoom).
+    #[serde(skip)]
+    pub zoom_anim: bool,
     pub before_after: BeforeAfter,
     pub thumb_size: f32,
     /// Open Edit sections by id.
@@ -197,6 +240,9 @@ pub struct UiState {
     pub single_panel: bool,
     pub show_clipping: bool,
     pub histogram: bool,
+    /// Soft proofing (S in the loupe): render as `proof` would hold the photo.
+    pub soft_proof: bool,
+    pub proof: lightcraft_engine::pipeline::Proof,
     /// Masking: show the selected mask as a rendered overlay (O), how (`MaskView` name, ⇧O cycles),
     /// in which colour and opacity (0..100, colour views), and whether pins are drawn.
     pub mask_overlay: bool,
@@ -211,8 +257,13 @@ pub struct UiState {
     pub crop_overlay_orient: u8,
     pub crop_overlay: CropOverlay,
     pub show_filenames: bool,
+    /// What the square grid's caption shows: `filename`, `exposure` (shutter · aperture · ISO ·
+    /// focal length) or `date`.
+    pub grid_info: String,
     /// Photo counts next to sources and albums in the left panel.
     pub show_counts: bool,
+    /// Local sidebar locations hidden with “Remove from Local” (folders on disk are untouched).
+    pub hidden_locations: Vec<String>,
     /// Copies opened in an external editor this session (reloaded when the window is focused
     /// again), and whether the window had focus last frame.
     #[serde(skip)]
@@ -232,6 +283,8 @@ pub struct UiState {
     /// A mask being renamed in the Masks list: its id and the edited name.
     #[serde(skip)]
     pub renaming_mask: Option<(u32, String)>,
+    /// A mask component being renamed inline: (mask id, component index, name).
+    pub renaming_component: Option<(u32, usize, String)>,
     /// Close the window on the next frame (File → Quit).
     #[serde(skip)]
     pub quit: bool,
@@ -268,12 +321,22 @@ pub struct UiState {
     pub spots_threshold: f32,
     /// The library filter bar above the grid.
     pub filter_bar: bool,
+    /// Folders kept in Local (Browse Folder…, Keep in Local / Add to Local; `local.addRoot`):
+    /// listed after the built-in locations, across restarts, whatever is browsed.
+    pub local_roots: Vec<String>,
+    /// The top-level Local row listed for this session only, for a browsed folder outside every
+    /// kept location; it stays while browsing below it (see `panels::left::local_places`).
+    #[serde(skip)]
+    pub local_browse_root: Option<String>,
     /// Culling: after a rating, flag or colour-label key, move to the next photo.
     pub auto_advance: bool,
     /// Full-screen preview (F): the photo alone on black, no chrome.
     pub fullscreen: bool,
     /// Window ▸ Second Window.
     pub second_window: bool,
+    /// The keyword painter: clicking a photo in the grid toggles this keyword on it.
+    #[serde(skip)]
+    pub keyword_painter: Option<String>,
     /// A running slideshow (full screen): seconds per photo, when the next one is due (egui
     /// time), paused.
     #[serde(skip)]
@@ -290,9 +353,15 @@ pub struct UiState {
     /// Compare view: (select, candidate) photo ids.
     #[serde(skip)]
     pub compare: Option<(u64, u64)>,
+    /// Reference view: the reference photo.
+    #[serde(skip)]
+    pub reference: Option<u64>,
     /// Transient toast text and its expiry (seconds of app time).
     #[serde(skip)]
     pub toast: Option<(String, f64)>,
+    /// The result of the last Find Missing Photos (it searches in the background).
+    #[serde(skip)]
+    pub last_find_missing: Option<serde_json::Value>,
     #[serde(skip)]
     pub status: String,
     #[serde(skip)]
@@ -343,7 +412,7 @@ pub enum Dialog {
         minutes: i32,
         zone: f32,
     },
-    /// The import review (File → Add Photos…).
+    /// The import review (File → Import Photos…).
     Import {
         opts: Box<crate::import::ImportDialog>,
     },
@@ -378,6 +447,12 @@ pub enum Dialog {
     },
     /// Help ▸ What's New.
     WhatsNew,
+    /// Photo ▸ Assisted Culling: reject photos below this focus score (0 = none), pick the best
+    /// of each burst.
+    Cull {
+        reject_below: f32,
+        pick_best: bool,
+    },
     /// Help ▸ System Info: (label, value) rows.
     SystemInfo {
         rows: Vec<(String, String)>,
@@ -441,16 +516,22 @@ pub enum Dialog {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            language: crate::i18n::default_language(),
             preview_build_seen: None,
+            unsaved_seen: false,
             luminance_map_restore: None,
             view: ViewMode::Detail,
             left_panel: false,
+            left_width: LEFT_WIDTH.default,
+            right_width: RIGHT_WIDTH.default,
             right: RightPanel::Edit,
             presets: false,
             preset_thumbs: false,
             filmstrip: true,
             zoom: Zoom::Fit,
             pan: (0.5, 0.5),
+            click_zoom: 100,
+            zoom_anim: false,
             before_after: BeforeAfter::Off,
             thumb_size: 220.0,
             open_sections: vec!["light".into()],
@@ -458,6 +539,8 @@ impl Default for UiState {
             single_panel: false,
             show_clipping: false,
             histogram: true,
+            soft_proof: false,
+            proof: lightcraft_engine::pipeline::Proof { dest_warning: false, ..Default::default() },
             mask_overlay: true,
             mask_overlay_mode: "color".into(),
             mask_overlay_color: [230, 30, 40],
@@ -466,7 +549,9 @@ impl Default for UiState {
             crop_overlay: CropOverlay::Thirds,
             crop_overlay_orient: 0,
             show_filenames: true,
+            grid_info: "filename".into(),
             show_counts: true,
+            hidden_locations: Vec::new(),
             dragging_control: None,
             external_edits: Vec::new(),
             was_focused: true,
@@ -474,6 +559,7 @@ impl Default for UiState {
             search: String::new(),
             focus_search: false,
             renaming_mask: None,
+            renaming_component: None,
             quit: false,
             dragging_photos: None,
             curve_channel: "parametric".into(),
@@ -498,13 +584,18 @@ impl Default for UiState {
             fullscreen: false,
             slideshow: None,
             second_window: false,
+            keyword_painter: None,
             info_overlay: InfoOverlay::Off,
             navigator: true,
             settings: AppSettings::default(),
             window_fullscreen: None,
             filter_bar: false,
+            local_roots: Vec::new(),
+            local_browse_root: None,
             compare: None,
+            reference: None,
             toast: None,
+            last_find_missing: None,
             status: String::new(),
             dialog: None,
         }
@@ -538,6 +629,8 @@ impl UiState {
     /// Clamp values restored from disk.
     pub fn sanitized(mut self) -> Self {
         self.thumb_size = self.thumb_size.clamp(90.0, 480.0);
+        self.left_width = LEFT_WIDTH.clamp(self.left_width);
+        self.right_width = RIGHT_WIDTH.clamp(self.right_width);
         self.brush_size = self.brush_size.clamp(0.002, 0.5);
         self.dialog = None;
         self.fullscreen = false;

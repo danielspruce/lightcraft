@@ -124,6 +124,19 @@ pub(crate) fn fit_rect(area: Rect, aspect: f32, zoom: Zoom, img_px: [usize; 2], 
     Rect::from_center_size(c, vec2(w, h))
 }
 
+/// Ease the loupe rect toward `target` while a click-zoom animation runs; otherwise follow it exactly.
+fn animated_rect(ctx: &egui::Context, anim: &mut bool, target: Rect) -> Rect {
+    let t = if *anim { 0.22 } else { 0.0 };
+    let id = egui::Id::new("loupe_anim");
+    let v = |k: &str, x: f32| ctx.animate_value_with_time(id.with(k), x, t);
+    let (c, s) = (target.center(), target.size());
+    let r = Rect::from_center_size(pos2(v("cx", c.x), v("cy", c.y)), vec2(v("w", s.x), v("h", s.y)));
+    if *anim && (r.center() - c).abs().max_elem() < 0.5 && (r.size() - s).abs().max_elem() < 0.5 {
+        *anim = false;
+    }
+    r
+}
+
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let full = ui.max_rect();
@@ -177,16 +190,18 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         _ => vec![area],
     };
     let main_area = *areas.last().unwrap_or(&area);
-    let img_rect = fit_rect(main_area, aspect, app.ui.zoom, native, ppp, app.ui.pan);
+    let target_rect = fit_rect(main_area, aspect, app.ui.zoom, native, ppp, app.ui.pan);
+    let img_rect = animated_rect(ui.ctx(), &mut app.ui.zoom_anim, target_rect);
     app.image_rect = Some(img_rect);
     // request renders: the loupe at display resolution (drafts during drags)
     let interacting = app.session.interaction.is_some();
     let scale = if interacting { 0.6 } else { 1.0 };
-    let want = (img_rect.width().max(img_rect.height()) * ppp * scale).min(max_edge) as usize;
+    // render at the final size: a click-zoom animation only changes how the result is drawn
+    let want = (target_rect.width().max(target_rect.height()) * ppp * scale).min(max_edge) as usize;
     let (rw, rh) = if aspect >= 1.0 { (want, (want as f32 / aspect) as usize) } else { ((want as f32 * aspect) as usize, want) };
     if let Some(job) = app.session.loupe_job(id, rw.max(8), rh.max(8), !crop_tool) {
         let job = if interacting { job.draft() } else { job };
-        let job = job.with_overlay(view_overlay(app, &d));
+        let job = job.with_overlay(view_overlay(app, &d)).with_proof(app.ui.soft_proof.then_some(app.ui.proof));
         app.renderer.request(Slot::Main, job, 100);
     }
     // hovering a preset or profile: the photo with that look, shown instead of the loupe render
@@ -249,18 +264,24 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         p.image(tex.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         what
     };
+    // soft proofing: a paper-white surround and the proof's name, as Lightroom shows it
+    if app.ui.soft_proof && !fullscreen {
+        p.rect_filled(canvas, 0.0, Color32::from_gray(238));
+        let label = crate::i18n::tr_format!("Proof Preview · {}", app.ui.proof.space.label());
+        p.text(pos2(canvas.right() - 16.0, canvas.top() + 14.0), Align2::RIGHT_CENTER, label, t.font(12.5), Color32::from_gray(60));
+    }
     let shown;
     if split {
         let br = fit_rect(areas[0], aspect, app.ui.zoom, native, ppp, app.ui.pan);
         draw(Slot::Before, br);
         shown = draw(Slot::Main, img_rect);
-        p.text(pos2(br.left(), br.bottom() + 14.0), Align2::LEFT_CENTER, "Before", t.font(12.0), t.text_dim);
-        p.text(pos2(img_rect.left(), img_rect.bottom() + 14.0), Align2::LEFT_CENTER, "After", t.font(12.0), t.text_dim);
+        p.text(pos2(br.left(), br.bottom() + 14.0), Align2::LEFT_CENTER, crate::i18n::tr("Before"), t.font(12.0), t.text_dim);
+        p.text(pos2(img_rect.left(), img_rect.bottom() + 14.0), Align2::LEFT_CENTER, crate::i18n::tr("After"), t.font(12.0), t.text_dim);
     } else if show_before {
         shown = draw(Slot::Before, img_rect);
-        p.text(pos2(img_rect.left() + 8.0, img_rect.top() + 14.0), Align2::LEFT_CENTER, "Before", t.font(12.0), t.text);
-    } else if let Some((key, label)) = &hover_key
-        && let Some(tex) = app.renderer.textures.get(&Slot::Hover).filter(|t| t.photo == id && t.key == *key)
+        p.text(pos2(img_rect.left() + 8.0, img_rect.top() + 14.0), Align2::LEFT_CENTER, crate::i18n::tr("Before"), t.font(12.0), t.text);
+    } else if let Some((_key, label)) = &hover_key
+        && let Some(tex) = app.renderer.textures.get(&Slot::Hover).filter(|t| t.photo == id)
     {
         p.image(tex.tex.id(), img_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         let g = p.layout_no_wrap(label.clone(), t.font(12.0), Color32::WHITE);
@@ -273,11 +294,17 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         if shown == "none" {
             match app.renderer.failure(Slot::Main) {
                 Some(e) => {
-                    p.text(canvas.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, "This photo can't be opened", t.semibold(14.0), t.text);
+                    p.text(
+                        canvas.center() - vec2(0.0, 10.0),
+                        Align2::CENTER_CENTER,
+                        crate::i18n::tr("This photo can't be opened"),
+                        t.semibold(14.0),
+                        t.text,
+                    );
                     p.text(canvas.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, e, t.font(12.0), t.text_dim);
                 }
                 None => {
-                    p.text(canvas.center(), Align2::CENTER_CENTER, "Rendering…", t.font(13.0), t.text_dim);
+                    p.text(canvas.center(), Align2::CENTER_CENTER, crate::i18n::tr("Rendering…"), t.font(13.0), t.text_dim);
                 }
             }
         }
@@ -329,8 +356,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     }
     // drawn and hit-tested above the loupe and its tools: clicks on it pan
     navigator(app, ui, canvas, img_rect, id);
+    if let Some(why) = photo.preview_only.as_deref().filter(|_| !fullscreen) {
+        preview_only_pill(ui, canvas, why);
+    }
     resp.context_menu(|ui| {
-        ui.menu_button("Zoom", |ui| {
+        ui.menu_button(crate::i18n::tr("Zoom"), |ui| {
             for (label, cmd) in [("Fit", "view.zoomFit"), ("100%", "view.zoom100"), ("Zoom In", "view.zoomIn"), ("Zoom Out", "view.zoomOut")] {
                 if ui.button(label).clicked() {
                     let _ = app.run(cmd, json!({}));
@@ -388,6 +418,22 @@ fn info_overlay(app: &LightcraftApp, p: &egui::Painter, canvas: Rect, photo: &li
         y += g.size().y + 3.0;
     }
     register(p.ctx(), "canvas:infoOverlay", Rect::from_min_max(canvas.min, pos2(canvas.left() + 320.0, y)));
+}
+
+/// A raw shown from its embedded JPEG (issue #10): a pill at the canvas' top centre saying so;
+/// hovering it explains (registered as `notice:previewOnly:loupe`).
+fn preview_only_pill(ui: &mut egui::Ui, canvas: Rect, reason: &str) {
+    let t = Tokens::get(ui.ctx());
+    let p = ui.painter_at(canvas);
+    let text = crate::i18n::tr_format!("Preview only — editing the camera's embedded JPEG ({})", crate::widgets::preview_only_variant(reason));
+    let g = p.layout_no_wrap(text, t.font(12.0), Color32::WHITE);
+    let size = vec2(g.size().x + 40.0, 26.0);
+    let r = Rect::from_min_size(pos2(canvas.center().x - size.x / 2.0, canvas.top() + 12.0), size);
+    p.rect_filled(r, 13.0, Color32::from_black_alpha(185));
+    crate::icons::paint(&p, Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(15.0, 15.0)), crate::icons::Icon::Info, t.caution);
+    p.galley(pos2(r.left() + 29.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+    register(ui.ctx(), "notice:previewOnly:loupe", r);
+    ui.interact(r, egui::Id::new("preview-only-pill"), Sense::hover()).on_hover_text(crate::widgets::preview_only_explanation(reason));
 }
 
 /// `2026-09-30T12:00:00` → `2026-09-30 12:00`.
@@ -574,7 +620,7 @@ fn general_interaction(
         }
         return;
     }
-    // click toggles Fit ↔ 100 % at the clicked point; drag pans when zoomed
+    // click toggles Fit ↔ the click-zoom ratio (2:1/3:1/5:1) at the clicked point; drag pans when zoomed
     let zoomed = img.width() > canvas.width() + 1.0 || img.height() > canvas.height() + 1.0;
     if resp.double_clicked() || (resp.clicked() && !zoomed) {
         if let Some(q) = resp.interact_pointer_pos() {
@@ -582,12 +628,17 @@ fn general_interaction(
             let v = ((q.y - img.top()) / img.height()).clamp(0.0, 1.0);
             app.ui.pan = (u, v);
         }
-        app.ui.zoom = if matches!(app.ui.zoom, Zoom::Fit) { Zoom::Percent(100) } else { Zoom::Fit };
+        app.ui.zoom = if matches!(app.ui.zoom, Zoom::Fit) { Zoom::Percent(app.ui.click_zoom) } else { Zoom::Fit };
+        app.ui.zoom_anim = true;
     } else if resp.clicked() && zoomed {
         app.ui.zoom = Zoom::Fit;
+        app.ui.zoom_anim = true;
     }
     if zoomed {
-        ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        // only over the photo: a panel drawn earlier (sliders) must keep its own cursor
+        if resp.dragged() || resp.hovered() {
+            ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        }
         if resp.dragged() {
             let dlt = resp.drag_delta();
             app.ui.pan.0 = (app.ui.pan.0 - dlt.x / img.width()).clamp(0.0, 1.0);
@@ -670,6 +721,15 @@ fn crop_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
             None if inside(hq) => egui::CursorIcon::Move,
             None => egui::CursorIcon::Alias,
         });
+    }
+    // double-click inside the crop box applies the crop (same as Return / Done)
+    if resp.double_clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+        && inside(q)
+        && !handles.iter().any(|h| h.distance(q) < 12.0)
+    {
+        let _ = app.run("tool.done", json!({}));
+        return;
     }
     if resp.drag_started()
         && let Some(q) = resp.interact_pointer_pos()
@@ -1165,18 +1225,26 @@ pub(crate) fn filmstrip(app: &mut LightcraftApp, ui: &mut egui::Ui, r: Rect) {
     let active = app.session.selection.active;
     let cell_w = 120.0;
     let ppp = ui.ctx().pixels_per_point();
+    if ids.is_empty() {
+        let why = if app.session.filter != Default::default() { "No photos match the filters (View → Clear Filters)" } else { "No photos" };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, why, t.font(12.5), t.text_dim);
+        return;
+    }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(0.0, 4.0))));
-    let scroll_key = egui::Id::new("film-last-active");
-    let last: Option<PhotoId> = child.data(|d| d.get_temp(scroll_key));
-    child.data_mut(|d| d.insert_temp(scroll_key, active));
+    // a vertical mouse wheel scrolls the strip sideways (horizontal trackpad scrolls still work)
+    child.style_mut().always_scroll_the_only_direction = true;
+    // only a new active photo (or the strip appearing) scrolls it; see `grid::follow_active`
+    let follow = super::grid::follow_active(child.ctx(), egui::Id::new("film-follow-active"), active);
     egui::ScrollArea::horizontal().id_salt("filmstrip").auto_shrink([false, false]).show_viewport(&mut child, |ui, vp| {
         let (area, _) = ui.allocate_exact_size(vec2(ids.len() as f32 * cell_w, r.height() - 16.0), Sense::hover());
+        app.film_scroll = Some(vp.left());
         for (i, id) in ids.iter().enumerate() {
             let cr = Rect::from_min_size(pos2(area.left() + i as f32 * cell_w, area.top()), vec2(cell_w, area.height()));
-            if Some(*id) == active && last != active {
+            let local = Rect::from_min_size(pos2(i as f32 * cell_w, 0.0), cr.size());
+            // centred when it is (partly) off screen; a click on a visible thumbnail leaves the strip alone
+            if follow && Some(*id) == active && !(local.left() >= vp.left() && local.right() <= vp.right()) {
                 ui.scroll_to_rect(cr, Some(egui::Align::Center));
             }
-            let local = Rect::from_min_size(pos2(i as f32 * cell_w, 0.0), cr.size());
             if !local.intersects(vp.expand2(vec2(cell_w * 4.0, 0.0))) {
                 continue;
             }

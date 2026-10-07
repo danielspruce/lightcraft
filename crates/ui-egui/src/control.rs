@@ -73,15 +73,23 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
         "pixelsPerPoint": ctx.pixels_per_point(),
         "canvasRect": app.canvas_rect.map(rect_json),
         "imageRect": app.image_rect.map(rect_json),
+        "scroll": {"grid": app.grid_scroll, "filmstrip": app.film_scroll},
         "active": app.session.active().map(|p| p.0),
         "selection": app.session.selection.ids.iter().map(|p| p.0).collect::<Vec<_>>(),
         "activeMask": app.session.active_mask,
         "widgetCount": app.widgets.len(),
-        "perf": {"frameMs": app.perf.frame_ms, "fps": app.perf.fps, "lastRenderMs": app.renderer.last_main_ms, "renderQueue": app.renderer.queued(), "rendersInFlight": app.renderer.in_flight(), "pendingSlots": app.renderer.pending_slots(), "mergeRunning": app.merge.busy(), "lastMerge": app.merge.last_result, "rendersDone": app.renderer.completed, "thumbTextures": app.renderer.thumb_textures(), "variantTextures": app.renderer.variant_textures(), "gpu": (lightcraft_engine::gpu::ready() && lightcraft_engine::gpu::available()).then(lightcraft_engine::gpu::adapter_name).flatten()},
+        "perf": {"frameMs": app.perf.frame_ms, "logicMs": app.perf.logic_ms, "updateMs": app.perf.update_ms, "maxUpdateMs": app.perf.max_update_ms, "fps": app.perf.fps, "lastRenderMs": app.renderer.last_main_ms, "renderQueue": app.renderer.queued(), "rendersInFlight": app.renderer.in_flight(), "pendingSlots": app.renderer.pending_slots(), "mergeRunning": app.merge.busy(), "lastMerge": app.merge.last_result, "rendersDone": app.renderer.completed, "thumbTextures": app.renderer.thumb_textures(), "variantTextures": app.renderer.variant_textures(), "gpu": (lightcraft_engine::gpu::ready() && lightcraft_engine::gpu::available()).then(lightcraft_engine::gpu::adapter_name).flatten(), "gpuReason": lightcraft_engine::gpu::unavailable_reason(), "gpuFallback": lightcraft_engine::gpu::last_fallback()},
         "loupe": app.loupe_shown.map(|(p, src)| json!({"photo": p.0, "source": src, "pending": app.renderer.is_pending(crate::render::Slot::Main)})),
         "hoverPreview": app.hover_preview.as_ref().map(|h| h.label.clone()),
         "status": app.ui.status,
+        "notices": app.notices,
+        "quitPrompt": app.quit_prompt,
+        "unsaved": app.session.unsaved().map(|(n, e)| json!({"ops": n, "error": e})),
+        "libraryProblem": app.library_problem.as_ref().map(crate::panels::library_problem::LibraryProblem::to_json),
+        "scan": app.scan.as_ref().map(crate::import::ScanTask::status),
         "export": {"running": app.export.as_ref().map(crate::export_task::ExportTask::status), "last": app.last_export_result},
+        "import": app.import.as_ref().map(crate::import::ImportTask::status),
+        "tasks": app.tasks.labels(),
         "memory": memory(app),
     })
 }
@@ -266,7 +274,14 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
             }
         }
         "ui.dialog.confirm" => match app.ui.dialog.take() {
-            Some(d) => wrap(crate::panels::dialogs::confirm_dialog(app, &d)),
+            Some(d) => {
+                let r = crate::panels::dialogs::confirm_dialog(app, &d);
+                // the import review stays open on an error, as with its button
+                if r.is_err() && matches!(d, crate::state::Dialog::Import { .. }) {
+                    app.ui.dialog = Some(d);
+                }
+                wrap(r)
+            }
             None => err("no dialog open"),
         },
         "ui.dialog.cancel" => {
@@ -280,12 +295,19 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
             ok(Value::Null)
         }
         "ui.screenshot" => {
+            // never over a photo's original
+            if let Some(Err(e)) = s("path").map(|path| app.session.check_write_target(path)) {
+                return err(e);
+            }
             ctx.request_repaint();
             Outcome::Screenshot { path: s("path").map(str::to_string), headless: p.get("headless").and_then(Value::as_bool).unwrap_or(false) }
         }
         "ui.render" => {
             let id = p.get("id").and_then(Value::as_u64).map(lightcraft_catalog::PhotoId).or(app.session.active());
             let Some(id) = id else { return err("no photo") };
+            if let Some(Err(e)) = s("path").map(|path| app.session.check_write_target(path)) {
+                return err(e);
+            }
             let size = p.get("size").and_then(Value::as_u64).unwrap_or(1600) as usize;
             match app.session.render_now(id, size, size) {
                 Ok(r) => match (s("path"), app.services.png.as_ref()) {
@@ -346,11 +368,7 @@ pub fn export_active(app: &mut LightcraftApp, p: &Value) -> Result<Value, String
     let to = Destination { dir: dir.clone(), exact: p.get("path").and_then(Value::as_str).map(str::to_string) };
     let background = p.get("background").and_then(Value::as_bool).unwrap_or(false) && app.services.write_shared.is_some();
     let out = if background {
-        let items = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| lightcraft_engine::export::prepare_export(&mut app.session, *id, &opts, i + 1))
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = lightcraft_engine::export::prepare_batch(&mut app.session, &ids, &opts)?;
         crate::export_task::start(app, items, opts, to)?
     } else {
         let w = app.services.write.as_mut().ok_or("no writer")?;

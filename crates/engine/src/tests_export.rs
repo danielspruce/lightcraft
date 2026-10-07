@@ -174,3 +174,173 @@ fn prepared_exports_run_on_another_thread() {
     assert_eq!(files[0]["width"], 48);
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+/// Issue #78: a GPU render whose work never ran (a driver that drops a submission without an
+/// error) gave an all-black export. The export must come from the CPU instead — the same
+/// image — with the reason recorded.
+#[test]
+fn export_falls_back_to_the_cpu_when_gpu_work_is_lost() {
+    let mut s = Session::with_demo();
+    let id = s.active().unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.4})).unwrap();
+    s.execute("develop.set", &json!({"control": "effects.clarity", "value": 20})).unwrap();
+    let o = ExportOptions::from_json(&json!({"format": "png"}));
+    let mean = |b: &[u8]| {
+        let d = lightcraft_codecs::decode(b, Default::default()).unwrap().image;
+        d.data.iter().map(|p| (p[0] + p[1] + p[2]) as f64).sum::<f64>() / (3 * d.data.len()) as f64
+    };
+    let gpu = lightcraft_gpu::available();
+    let healthy = mean(&export_photo(&mut s, id, &o, 1).unwrap().bytes);
+    lightcraft_gpu::inject_fault(lightcraft_gpu::Fault::DropWork);
+    let faulted = export_photo(&mut s, id, &o, 1).unwrap().bytes;
+    if gpu {
+        let why = lightcraft_gpu::last_fallback().unwrap_or_default();
+        assert!(why.contains("incomplete"), "{why}");
+        // the GPU is off for the process now: this export renders on the CPU
+        assert!(!lightcraft_gpu::available());
+    }
+    let cpu = export_photo(&mut s, id, &o, 1).unwrap().bytes;
+    lightcraft_gpu::reset_failures();
+    let px = |b: &[u8]| lightcraft_codecs::decode(b, Default::default()).unwrap().image.data;
+    assert!(px(&faulted) == px(&cpu), "the fallback is the CPU render");
+    let m = mean(&faulted);
+    assert!(m > 0.02, "not black: mean {m}");
+    assert!((m - healthy).abs() < 0.01, "GPU {healthy} vs CPU {m}");
+}
+
+/// A JPEG original `dir/IMG_1.jpg` imported into a library on disk.
+fn library_with_jpeg(tag: &str) -> (Session, lightcraft_catalog::PhotoId, std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
+    let dir = temp_dir(tag);
+    let src = dir.join("IMG_1.jpg");
+    let img = lightcraft_raster::Rgba8::from_fn(48, 32, |x, y| [(x * 5) as u8, (y * 7) as u8, 120, 255]);
+    let bytes = crate::export::encode_image(&img, &ExportOptions::default()).unwrap();
+    std::fs::write(&src, &bytes).unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    let id = s.catalog.photos().next().unwrap().id;
+    s.execute("develop.set", &json!({"ids": [id.0], "control": "light.exposure", "value": 1.0})).unwrap();
+    (s, id, dir, src, bytes)
+}
+
+fn disk_batch(
+    s: &mut Session,
+    id: lightcraft_catalog::PhotoId,
+    o: &ExportOptions,
+    to: &crate::export::Destination,
+) -> Result<Vec<serde_json::Value>, String> {
+    crate::export::export_batch(s, &[id], o, to, &mut crate::export::write_file, &|p| std::path::Path::new(p).exists())
+}
+
+/// Issue #93: exporting into the photo's own folder as `{name}` with "Overwrite" replaced the
+/// original with the re-encoded render. It is refused now, whatever the policy or exact path.
+#[test]
+fn export_never_overwrites_an_original() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, src, original) = library_with_jpeg("export-guard");
+    let folder = Destination { dir: dir.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { naming: "{name}".into(), conflict: Conflict::Overwrite, ..Default::default() };
+    let err = disk_batch(&mut s, id, &o, &folder).unwrap_err();
+    assert!(err.contains("original of IMG_1.jpg"), "{err}");
+    assert_eq!(std::fs::read(&src).unwrap(), original, "the original is byte-identical");
+
+    // the exact path of the control channel / MCP, also spelled another way
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for exact in [src.to_string_lossy().to_string(), dir.join("sub/../IMG_1.jpg").to_string_lossy().to_string()] {
+        let to = Destination { dir: String::new(), exact: Some(exact) };
+        assert!(disk_batch(&mut s, id, &o, &to).unwrap_err().contains("never writes over an original"));
+    }
+    // the "Original" format re-writing the file onto itself (and its sidecar)
+    let orig = ExportOptions { format: ExportFormat::Original, ..o.clone() };
+    assert!(disk_batch(&mut s, id, &orig, &folder).is_err());
+    assert_eq!(std::fs::read(&src).unwrap(), original);
+    assert!(s.execute("export.checkTarget", &json!({"path": src.to_string_lossy()})).is_err());
+    assert!(s.execute("export.checkTarget", &json!({"path": dir.join("free.jpg").to_string_lossy()})).is_ok());
+
+    // Unique moves past it; Overwrite still replaces an ordinary earlier export
+    let unique = ExportOptions { conflict: Conflict::Unique, ..o.clone() };
+    let files = disk_batch(&mut s, id, &unique, &folder).unwrap();
+    assert!(files[0]["path"].as_str().unwrap().ends_with("IMG_1-2.jpg"), "{files:?}");
+    let earlier = dir.join("IMG_1-2.jpg");
+    std::fs::write(&earlier, b"an earlier export").unwrap();
+    let named = ExportOptions { naming: "{name}-2".into(), ..o };
+    disk_batch(&mut s, id, &named, &folder).unwrap();
+    assert_ne!(std::fs::read(&earlier).unwrap(), b"an earlier export", "an ordinary file is overwritten");
+    assert_eq!(std::fs::read(&src).unwrap(), original);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #93: the XMP sidecar of an "Original" export ignored the conflict policy.
+#[test]
+fn export_sidecars_follow_the_conflict_policy() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, _src, original) = library_with_jpeg("export-sidecar");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let theirs = out.join("IMG_1.xmp");
+    std::fs::write(&theirs, b"someone else's sidecar").unwrap();
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { format: ExportFormat::Original, naming: "{name}".into(), ..Default::default() };
+
+    // Unique: the photo and its sidecar both move to the next free name
+    let files = disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Unique, ..o.clone() }, &to).unwrap();
+    assert!(files[0]["path"].as_str().unwrap().ends_with("IMG_1-2.jpg"), "{files:?}");
+    assert!(files[0]["sidecars"][0].as_str().unwrap().ends_with("IMG_1-2.xmp"), "{files:?}");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's sidecar");
+    assert_eq!(std::fs::read(out.join("IMG_1-2.jpg")).unwrap(), original);
+    // Skip: a taken sidecar name skips the photo
+    std::fs::remove_file(out.join("IMG_1-2.jpg")).unwrap();
+    std::fs::remove_file(out.join("IMG_1-2.xmp")).unwrap();
+    let files = disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Skip, ..o.clone() }, &to).unwrap();
+    assert!(files[0]["skipped"].as_str().is_some(), "{files:?}");
+    assert!(!out.join("IMG_1.jpg").exists());
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's sidecar");
+    // Overwrite: replaced, as asked
+    disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Overwrite, ..o }, &to).unwrap();
+    assert!(std::fs::read_to_string(&theirs).unwrap().contains("xmpmeta"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #93: the native writer truncated the target first; a failure mid-write (full disk,
+/// unplugged drive) now leaves the previous file intact and no partial one.
+#[test]
+fn a_failed_export_write_keeps_the_previous_file() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, _src, _) = library_with_jpeg("export-midwrite");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let prev = out.join("IMG_1.jpg");
+    std::fs::write(&prev, b"last week's export").unwrap();
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { conflict: Conflict::Overwrite, ..Default::default() };
+    {
+        let _fault = lightcraft_catalog::safe_file::fail_writes_after(100);
+        let err = disk_batch(&mut s, id, &o, &to).unwrap_err();
+        assert!(err.contains("injected"), "{err}");
+    }
+    assert_eq!(std::fs::read(&prev).unwrap(), b"last week's export");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "no temp file left behind");
+    disk_batch(&mut s, id, &o, &to).unwrap();
+    assert_ne!(std::fs::read(&prev).unwrap(), b"last week's export");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #134: exports can always be made again, so they are written atomically but not synced to
+/// disk file by file; an edit copy that becomes a library photo still is.
+#[test]
+fn exports_are_atomic_without_a_sync() {
+    use crate::export::{Conflict, Destination};
+    use lightcraft_catalog::safe_file::syncs_on_this_thread;
+    let (mut s, id, dir, _src, _) = library_with_jpeg("export-nosync");
+    let out = dir.join("out");
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { conflict: Conflict::Unique, ..Default::default() };
+    let before = syncs_on_this_thread();
+    for _ in 0..3 {
+        disk_batch(&mut s, id, &o, &to).unwrap();
+    }
+    assert_eq!(syncs_on_this_thread(), before, "no per-file sync for exports");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3, "three exports, no temp files");
+    crate::export::write_file_durable(&out.join("edit.tif").to_string_lossy(), b"tiff").unwrap();
+    assert!(syncs_on_this_thread() > before, "the durable writer syncs");
+    let _ = std::fs::remove_dir_all(&dir);
+}

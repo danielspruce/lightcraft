@@ -52,9 +52,18 @@ codecs) at opt-level 3 and the rest (egui, eframe, serde, glue) at "s". What goe
 is the brotli column: 3.1 MB, 11 % less than the old build's brotli size and 41 % less than its
 gzip size (5.25 MB). `wasm-opt -Oz`, when installed, shrinks it further.
 
+**Fonts.** The browser has no system fonts to fall back on, so Japanese text comes from
+[craft-fonts](https://github.com/storytold/craft-fonts), the optional `CRAFT_FONTS_DIR` build
+input (`CRAFT_FONTS_DIR=../craft-fonts cargo xtask web`; release builds always set it). On wasm32
+`crates/engine/build.rs` embeds only BIZ UDPGothic Regular (UI, and the watermark fallback), so
+the module stays well under Cloudflare's 25 MiB per-file limit: measured 2026-10-06, 17.1 MB
+without craft-fonts and 21.8 MB with it (brotli 3.8 MB / 6.3 MB). Without it the web build
+works, but Japanese text has no glyphs.
+
 ## Deploying: headers
 
-`cargo xtask web --serve` sends these on every response, and a production server should too:
+`cargo xtask web --serve` sends these on every response. A production server may send them too;
+today they are optional:
 
 ```
 Cross-Origin-Opener-Policy: same-origin
@@ -62,11 +71,13 @@ Cross-Origin-Embedder-Policy: require-corp
 Cross-Origin-Resource-Policy: same-origin
 ```
 
-COOP + COEP make the page *cross-origin isolated* (`crossOriginIsolated === true`). That is
+COOP + COEP make the page *cross-origin isolated* (`crossOriginIsolated === true`). That will be
 **required** for `SharedArrayBuffer`, i.e. for a future wasm-threads build (`+atomics`, nightly
 `build-std`), and gives full-resolution `performance.now()`. The current render workers (below)
-don't share memory, so the app also runs without them; with COEP on, every subresource must be
-same-origin or send CORP/CORS headers (the bundle has no third-party resources).
+don't share memory, so the app runs without them; with COEP on, every subresource must be
+same-origin or send CORP/CORS headers (the bundle has no third-party resources). The file names
+are the same in every version, so serve them with `Cache-Control: no-cache` (not `immutable`);
+`packaging/web/README.md` (shipped as `HOSTING.md`) has the hosting details.
 
 ## What works
 
@@ -80,17 +91,44 @@ same-origin or send CORP/CORS headers (the bundle has no third-party resources).
     the background within a frame or two, each file replaced atomically, in modification order
     (`apps/lightcraft-web/src/files.rs`). View state and UI prefs are saved every second when they
     change (a tab can close without notice).
+  - Known limitation: the browser storage has no file locks, so two tabs of the same origin open
+    the same library and the last one to write a snapshot wins (the desktop app and the CLI lock
+    a library folder: `catalog.lock`, issue #99). Use one tab at a time; a guard through the Web
+    Locks API (`navigator.locks`) is still to do.
   - `originals/<content hash>`: the bytes of every imported photo. The catalog refers to them as
     `web/<hash>/<file name>`; the main thread keeps recently used originals in memory (≤ 768 MB)
     and loads the rest on demand (the active photo is prefetched).
   - `thumbs/<key>.jpg` + `thumbs/index.json`: the rendered-thumbnail cache, with the desktop's
     budget (2 GB, least recently used pruned to 80 %).
 
-  A new library starts with the procedural demo photos. The app asks for persistent storage
-  (`navigator.storage.persist()`); without it the browser may evict the data under storage
-  pressure. URL options: `?store=idb` forces IndexedDB, `?store=memory` keeps nothing, `?reset`
-  deletes the stored library first.
-- **Importing photos with no filesystem.** *File ▸ Add Photos…* (<kbd>⌘⇧I</kbd>) opens the
+  A new library starts with the procedural demo photos. URL options: `?store=idb` forces
+  IndexedDB, `?store=memory` keeps nothing, `?reset` deletes the stored library first (after a
+  confirmation: it deletes every imported photo too).
+- **Keeping the library safe** (experimental: the library lives only in this browser):
+  - The app asks for persistent storage (`navigator.storage.persist()`); when the browser doesn't
+    grant it, a notice says the library may be evicted under storage pressure.
+  - **File ▸ Back Up Library…** downloads a zip of the library files and every stored original
+    (`originals/<hash>/<file name>`, so an unzipped backup is browsable; entries are stored, not
+    compressed; at most 4 GB). **File ▸ Restore Library from Backup…** reads such a zip into a
+    new library folder (`library-restored-<time>/`; originals already stored are skipped, every
+    entry's checksum is verified) and only then switches to it (`active-library` names the
+    folder in use) and reloads: the previous library stays in storage. Both are web-only
+    (`file.backupLibrary`, `file.restoreLibrary`; the desktop library is a folder).
+  - A failed save (quota exceeded, storage cleared) is not silent: the catalog then refuses new
+    writes, so commands report `saved in memory but not written`, the top bar shows the unsaved
+    warning (as on the desktop, see `docs/control-protocol.md`), and saving is retried every
+    2 s until it works (`web.stats` → `saveError`).
+  - A picked or dropped photo whose bytes can't be stored is not added (it would be gone after
+    a reload); a notice says why.
+  - One tab at a time: the page holds a Web Lock (`navigator.locks`, `lightcraft-library`); a
+    second tab or window shows "LightCraft is already open in another tab" instead of loading
+    its own copy (two copies would overwrite each other's saves). Browsers without Web Locks
+    aren't protected.
+  - If the stored library can't be opened, a notice says the session is temporary and nothing
+    is saved; the stored library is left as it was.
+  - A panic (wasm is built with `panic = "abort"`) replaces the page with a message saying the
+    stored library is kept and to reload, instead of a frozen canvas.
+- **Importing photos with no filesystem.** *File ▸ Import Photos…* (<kbd>⌘⇧I</kbd>) opens the
   browser's file picker. You can also drop files anywhere on the page. The bytes are written to
   storage, then imported and decoded by the same engine code as the desktop app
   (`lightcraft_engine::files::{probe_bytes, load_bytes}`): JPEG/PNG/TIFF/WebP and the supported
@@ -119,6 +157,12 @@ same-origin or send CORP/CORS headers (the bundle has no third-party resources).
   yet fails with "still loading" and works a moment later.
 - **Durability is "a frame later", not fsync-before-return:** a crash or tab kill in the few
   milliseconds between a command and its flush loses that command.
+- **Data-safety gaps still open** (issue #107): a panic in a decoder still ends the page (and a
+  photo that panics while its thumbnail renders can do so again after a reload; there is no
+  `?safe` start that skips rendering yet); removing photos doesn't delete their stored originals
+  (`originals/<hash>`; they are kept, and included in backups); restored-over libraries stay in
+  storage until the site's data is cleared; backups larger than 4 GB need zip64, which isn't
+  written yet.
 - **Preset files** (import/export `.json`) aren't wired to browser pickers yet.
 - **Control channel / MCP.** These are desktop-only, because they need a TCP socket.
 - **AVIF export** is untested in the browser; it's the one encoder that may not be wasm-safe.

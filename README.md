@@ -280,9 +280,18 @@ lightcraft --control 7980 ~/Pictures/trip
 
 ## Feature status
 
-LightCraft is young and moving fast; see the [roadmap](ROADMAP.md) for estimates. The detailed, row-by-row
-Lightroom parity tracker (every feature, menu item and shortcut with its status, evidence and the top gaps) is
-[docs/parity.md](docs/parity.md).
+LightCraft is young and moving fast. **Where we honestly stand** (details in the [roadmap](ROADMAP.md#where-we-stand)):
+
+- **By feature count we're at ~79%** of Lightroom (core features 98%), tracked row by row in
+  [docs/parity.md](docs/parity.md).
+- **As a day-to-day Lightroom replacement we're nearer 60–70%.** It's great for JPEG/DNG and most Nikon / Sony /
+  older-Canon raws on one machine.
+- **The biggest gaps:**
+  - **camera colour calibration:** raws other than DNG develop with a neutral colour matrix today, so colour is muted;
+  - **CR3 and compressed Fujifilm / Olympus raws:** these open as embedded previews only;
+  - **AI masks and denoise:** subject and sky selection are classical heuristics;
+  - **HDR, video and the Classic Print / Book / Map modules.**
+- **What's next:** see [where we're going](ROADMAP.md#where-were-going).
 
 | Area | Status |
 |---|---|
@@ -292,17 +301,20 @@ Lightroom parity tracker (every feature, menu item and shortcut with its status,
 | Masking: brush, linear, radial, luminance/colour range, add/subtract/intersect | ✅ (AI subject/sky use classical heuristics for now) |
 | Crop, straighten tool + auto straighten, flip, rotate, aspect ratios, overlays | ✅ |
 | Profiles (Color, Neutral, Vivid, Landscape, Portrait, Monochrome: our own looks), presets, versions, history, copy/paste/sync settings | ✅ |
+| Camera colour: DNG files use their own matrices | ✅ · our own calibration for other raws ⬜ (top priority; neutral fallback today) |
 | Native macOS menu bar (generated from the command registry), control channel + every widget addressable, headless UI snapshots | ✅ |
-| RAW: DNG, CR2, ARW, NEF (uncompressed), Fujifilm RAF (Bayer + X-Trans), Panasonic RW2, Pentax PEF, Olympus ORF; embedded previews for every format incl. CR3 | ✅ · compressed NEF/RAF/ORF, CR3 decode 🚧 |
+| RAW: DNG, CR2, ARW, NEF (uncompressed + lossless/lossy compressed), Fujifilm RAF (uncompressed, Bayer + X-Trans), Panasonic RW2, Pentax PEF, Olympus ORF (uncompressed); embedded previews for every format incl. CR3 | ✅ · CR3, compressed RAF/ORF decode ⬜ |
 | Detail: sharpening, luminance + colour noise reduction | ✅ · AI Denoise, Super Resolution ⬜ |
 | Remove / Heal / Clone spots (auto source), Visualize Spots, Red Eye and Pet Eye (auto pupil detection, catchlight) | ✅ · content-aware fill, spot pin editing 🚧 |
-| Export: JPEG / PNG / TIFF / WebP / AVIF, sizing, file-size limit, output sharpening, naming, batch, metadata policy, text watermark | ✅ · DNG export, image watermark ⬜ |
-| Library persistence (crash-safe op log + snapshots), disk thumbnail cache, import with duplicate detection | ✅ |
+| Export: JPEG / PNG / TIFF / WebP / AVIF / DNG / original, sizing, file-size limit, output sharpening, naming templates, batch, metadata policy, text or image watermark | ✅ · HDR export ⬜ |
+| Library persistence (crash-safe op log + snapshots, background compaction, failed saves reported), disk thumbnail cache | ✅ |
+| Import: Add in place / Copy / Move, rename and folder templates, devices, duplicate detection, watched folders; Local folder browsing | ✅ |
 | MCP server (headless or live app, persistent libraries), CLI, control channel | ✅ |
 | XMP sidecars (read/write, auto-write), reading `crs:` develop settings, preset files (`.lcpreset`, XMP presets) | ✅ |
 | Optics (distortion, vignetting, auto + manual CA, defringe, DNG-embedded lens corrections), Geometry (transforms, Constrain Crop), Upright (Auto/Level/Vertical/Full/Guided) | ✅ · camera lens profiles (our own) ⬜ |
 | Photo Merge: HDR (auto-align, deghost), Panorama (spherical/cylindrical/perspective, boundary warp, auto crop), HDR Panorama → DNG | ✅ |
-| GPU pipeline (wgpu compute, CPU-exact within 1/255) with CPU fallback | ✅ · WebGPU in the browser 🚧 |
+| GPU pipeline (wgpu compute, CPU-exact within 1/255), CPU fallback on device limits / errors | ✅ · WebGPU in the browser 🚧 |
+| AI: segmentation masks, AI denoise, super resolution, faces; HDR editing; video | ⬜ (see [roadmap](ROADMAP.md#where-were-going)) |
 | Web build (same UI in the browser via WASM): persistent library in OPFS/IndexedDB, Web Worker rendering, export downloads | ✅ · WebGPU, Safari/Firefox testing 🚧 |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started</sub>
@@ -321,6 +333,16 @@ cargo xtask web --serve                                 # the same app in the br
 cargo run --release -p lightcraft-cli -- render photo.jpg -o out.jpg --set light.exposure=0.5
 cargo xtask ci                                          # fmt, clippy, tests, layering, wasm checks
 ```
+
+**Japanese text** needs the shared font repo, an optional build input (official releases always include it):
+
+```sh
+git clone https://github.com/storytold/craft-fonts ../craft-fonts
+CRAFT_FONTS_DIR=../craft-fonts cargo run --release -p lightcraft
+```
+
+Without it LightCraft builds and runs the same, but Japanese text has no glyphs. Fonts are never committed to this
+repo; see [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md).
 
 The web build needs the `wasm32-unknown-unknown` target and the matching `wasm-bindgen` CLI
 (`cargo xtask web` prints the exact install command); see [docs/web.md](docs/web.md).
@@ -344,9 +366,13 @@ Humans and agents follow the same rules, so read [AGENTS.md](AGENTS.md) first. T
   work from public specs and black-box observation.
 - **No Adobe assets, ever:** no icons, screenshots, presets, profiles, LUTs or fonts from Adobe products. Every
   image, icon and font in the repo is original, public domain, Creative Commons, OFL or permissively licensed, and has
-  an entry in [assets/ATTRIBUTION.md](assets/ATTRIBUTION.md) added in the same commit.
+  an entry in [assets/ATTRIBUTION.md](assets/ATTRIBUTION.md) added in the same commit. New fonts go to
+  [storytold/craft-fonts](https://github.com/storytold/craft-fonts), not here.
 - **Pure Rust**, enforced crate layering, everything is a command, and `cargo xtask ci` green before every commit
   (one task id per commit).
+- **Never crash.** Non-test code returns errors instead of panicking: no `unwrap()`, `expect()`, `panic!` or
+  `unsafe`, checked indexing on anything derived from input, and a regression test with every crash fix. Details in
+  [AGENTS.md](AGENTS.md#never-crash-outranks-feature-work).
 
 Questions, ideas or a bug you'd like to talk through first? Bring them to [Discord](https://discord.gg/artcraft).
 
@@ -396,12 +422,23 @@ And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video stud
 
 ## License and credits
 
-LightCraft is licensed under **MIT OR Apache-2.0**.
+LightCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Copyright (c) 2026 ArtCraft Team and the LightCraft contributors. Required notices are in [NOTICE](NOTICE).
+
+Bundled fonts, icons, images and other assets keep their own open licenses; each one is listed
+with its author, source and license in [assets/ATTRIBUTION.md](assets/ATTRIBUTION.md).
 
 Showcase photographs are public-domain works, used via Wikimedia Commons: Ansel Adams, *The Tetons and the Snake River*
 (1942, U.S. National Archives); Dorothea Lange, *Migrant Mother* (1936, Library of Congress); Bill Anders / NASA,
 *Earthrise* (1968); NASA, *The Blue Marble* (1972). The demo library is procedurally generated by LightCraft. UI font:
-Inter (SIL OFL). All icons are original. See [assets/ATTRIBUTION.md](assets/ATTRIBUTION.md).
+Inter (SIL OFL 1.1). Builds made with [craft-fonts](https://github.com/storytold/craft-fonts) (all official releases)
+also embed its Japanese fonts (BIZ UDPGothic, BIZ UDMincho, Shippori Mincho; SIL OFL 1.1), listed in its
+[ATTRIBUTION.md](https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md). All icons are original.
+
+The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are trademarks of the
+ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as
+part of this repository and LightCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
+Forks and modified versions must remove them.
 
 <sub>Adobe, Photoshop, Illustrator, Premiere Pro, Lightroom, Acrobat, After Effects and InDesign are trademarks or registered trademarks of Adobe Inc. in the United States and/or other countries. LightCraft is an independent, open-source project and is not affiliated with, sponsored by or endorsed by Adobe Inc.; these names are used only to describe the workflows it is compatible with.</sub>
 

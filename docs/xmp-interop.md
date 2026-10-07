@@ -8,8 +8,8 @@ other tools), and let LightCraft pick up edits made elsewhere.
 
 | | |
 |---|---|
-| Name | `<stem>.xmp` by default (`IMG_0001.CR3` → `IMG_0001.xmp`); `<file>.xmp` (`IMG_0001.CR3.xmp`) with `naming: "full"`. Reading accepts either (preferred first) and `.XMP`. |
-| Write | `photo.saveMetadataToFile {ids?}` (Photo ▸ Save Metadata to File, ⌘S), or automatically after every change with `library.xmpPreferences {autoWrite: true}` (File ▸ Automatically Write Changes into XMP). Slider drags are written once, when the drag ends; undo/redo rewrite the sidecar. Written atomically (temp file + rename). |
+| Name | `<stem>.xmp` by default (`IMG_0001.CR3` → `IMG_0001.xmp`); `<file>.xmp` (`IMG_0001.CR3.xmp`) with `naming: "full"`. Reading accepts either (preferred first) and `.XMP`. With stem naming, files sharing a stem don't share a sidecar: see *Shared names* below. |
+| Write | `photo.saveMetadataToFile {ids?}` (Photo ▸ Save Metadata to File, ⌘S), or automatically after every change with `library.xmpPreferences {autoWrite: true}` (File ▸ Automatically Write Changes into XMP). Slider drags are written once, when the drag ends; undo/redo rewrite the sidecar. An existing sidecar is **merged into, never replaced** (see *Saving into an existing sidecar*). Written atomically (temp file, fsync, rename). The result lists `written`, `merged` and `backups`. |
 | Read | On import (`library.import`, the report counts `sidecars`), and `photo.readMetadataFromFile {ids?}` (one undo step). For raw/DNG files without a sidecar, the XMP embedded in the file is used. |
 | Preferences | `library.xmpPreferences {autoWrite?, naming?: stem\|full}`, stored in the library's `prefs.json`. |
 
@@ -20,6 +20,8 @@ What we write (standard namespaces, so other tools can read the metadata):
 | Rating 0–5 | `xmp:Rating` |
 | Colour label | `xmp:Label` (`Red`, `Yellow`, `Green`, `Blue`, `Purple`) |
 | Title / caption / copyright / creator | `dc:title` / `dc:description` / `dc:rights` / `dc:creator` |
+| Copyright status | `xmpRights:Marked` (`True` copyrighted, `False` public domain, absent = unknown) |
+| Rights usage terms / copyright info URL | `xmpRights:UsageTerms` / `xmpRights:WebStatement` |
 | Keywords | `dc:subject` |
 | Capture time, GPS | `exif:DateTimeOriginal`, `photoshop:DateCreated`, `exif:GPSLatitude`/`GPSLongitude` |
 | Pick / reject flag | `lc:flag` (`pick`, `reject`, `none`) |
@@ -29,8 +31,44 @@ What we write (standard namespaces, so other tools can read the metadata):
 `lc:` is `http://ns.lightcraft.app/lc/1.0/`.
 
 Reading merges into the catalog with the **sidecar winning** for every field it states; fields it doesn't state are
-kept. `xmp:Rating="-1"` (the XMP convention for rejected) sets the reject flag. Develop settings come from
+kept. The one exception is the **capture time**: a time embedded in the file (EXIF/IPTC) always wins; when the file
+has none, the sidecar's `exif:DateTimeOriginal`, else `photoshop:DateCreated`, else `xmp:CreateDate` (ISO 8601) is
+used — on import (it then also files a copied photo in its date folder) and by `photo.readMetadataFromFile` (undoable).
+`xmp:Rating="-1"` (the XMP convention for rejected) sets the reject flag. Develop settings come from
 `lc:settings` when present (exact); otherwise from the `crs:` fields below (approximate).
+
+## Saving into an existing sidecar
+
+A sidecar may already hold another application's data — e.g. its `crs:` develop settings and `xmpMM:History` — often
+the only copy of those edits outside that application's catalog. Saving never drops it:
+
+- LightCraft **owns** the properties in the table above: `xmp:Rating`, `xmp:Label`, `dc:title`, `dc:description`,
+  `dc:rights`, `dc:creator`, `dc:subject`, `Iptc4xmpCore:Location`, `Iptc4xmpCore:AltTextAccessibility`,
+  `Iptc4xmpCore:ExtDescrAccessibility`, `photoshop:City`/`State`/`Country`, `xmpRights:Marked`/`UsageTerms`/
+  `WebStatement` and everything in `lc:`. They are replaced on every save, and removed when LightCraft has no value
+  (clearing a title in LightCraft clears it in the file). All of them are read back on import, so the library starts
+  from what the sidecar said.
+- The **capture time** (`exif:DateTimeOriginal`, `photoshop:DateCreated`) and **GPS** (`exif:GPSLatitude`,
+  `exif:GPSLongitude`) are replaced only when LightCraft has a value; otherwise the file's stay.
+- **Everything else is kept byte for byte**: other namespaces (`crs:`, `xmpMM:`, `lr:hierarchicalSubject`, unknown
+  ones), `xmp:CreatorTool`, comments, the packet wrapper and padding. LightCraft's properties go into one
+  `rdf:Description` of their own; owned properties written by another application (in attribute or element form) are
+  removed from its description, which otherwise stays as it was.
+- A sidecar that can't be read as XMP (not well-formed, not UTF-8, no `rdf:RDF`) is first copied to
+  `<name>.xmp.bak-<date><time>` (`-1`, `-2`… if taken — a backup is never overwritten), then replaced. A sidecar that
+  can't be read at all (permissions) is left alone and the save fails.
+
+Limits: LightCraft writes keywords to `dc:subject` only, so another application's `lr:hierarchicalSubject` is kept as
+it was and may still list keywords removed in LightCraft. LightCraft doesn't write `crs:`: the other application's
+develop settings stay as that application left them, next to LightCraft's own (`lc:settings`, which LightCraft reads
+first).
+
+## Shared names
+
+With stem naming, `IMG_0001.CR3` and `IMG_0001.JPG` map to the same `IMG_0001.xmp`. When two or more files in the
+library share a stem, the stem sidecar belongs to one of them — a raw first, otherwise the first by file name — and
+the others write and read `<file>.xmp` (`IMG_0001.JPG.xmp`), falling back to the stem sidecar for reading when they
+have none. So saving one photo never overwrites the other's metadata (`Session::sidecar_naming`).
 
 ## Reading `crs:` develop fields
 
@@ -116,3 +154,36 @@ carry over are listed in `preset.import`'s `unmapped` as `Mask: <kind>`.
 | XMP presets | Read with the `crs:` table above, with `crs:Name` as the name (falling back to the file name) and `crs:Group` as the group (falling back to "Imported Presets"). Only the fields the preset sets are included, so applying it leaves everything else alone and the Amount slider scales it like any other preset. We only read XMP presets; we don't write them. |
 
 LightCraft ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).
+
+## Luminar looks (`.lmp`, `.mplumpack`)
+
+`preset.import` (and drag & drop, File ▸ Import Profiles & Presets…) also reads Luminar looks: an `.lmp` file is an
+XML property list of adjustment layers (each with effects and named sliders, mostly on a −100..100 scale); newer looks
+may be a bundle folder `Name.lmp/Contents/preset.lmp`. An `.mplumpack` collection is a zip of `.lmp` files whose
+`PresetsInfo.plist` names the group (`GroupName`); the pack's file name is the fallback. Looks get their own name
+(`Name`) or their file / bundle name. The sliders with a clear counterpart are carried over; everything else (AI tools,
+Orton, glow, LUT layers, colour balance…) is listed in `unmapped` as `Tool.Slider` (e.g. `OrtonFilter.Amount`).
+Disabled layers are ignored, layer opacity scales the sliders (and fades curves toward a straight line), and layers
+with a blend mode other than Normal or with a mask are reported, not applied. Binary property lists are not read.
+
+| Luminar tool.slider | Ours |
+|---|---|
+| Develop / Light / Exposure `Exposure` (±100) | `light.exposure` (±4 EV — the scale is our reading, not documented) |
+| `Contrast`, `Highlights`, `Shadows`, `Whites`, `Blacks` | `light.*` (same scale) |
+| `Temperature`, `Tint` (relative) | white balance shift as `crs:IncrementalTemperature` / `IncrementalTint`; values above 1000 as Kelvin |
+| `Saturation`, `Vibrance` | `color.saturation`, `color.vibrance` |
+| Clarity `Clarity`, Structure / AI Structure `Amount` | `effects.clarity` (summed) |
+| Dehaze `Amount` | `effects.dehaze` |
+| HSL (`MIPLChannelsEffect`) `h`/`s`/`l` + Red…Magenta | `mixer.<band>.hue / sat / lum` |
+| Curves `RGB` / `Red` / `Green` / `Blue` (x, y points in 0..1) | `curve.master / red / green / blue` |
+| Vignette `Amount`, `Vignette Size` | `vignette.amount`, `vignette.midpoint` |
+| Grain `Amount` | `grain.amount` |
+
+## Profiles: 3D LUTs (`.cube`)
+
+`profile.import {paths}` (File ▸ Import Profiles & Presets…, drag & drop) reads `.cube` 3D LUTs — single files, folders
+or `.zip` bundles — as creative profiles: they appear in the profile browser under their folder's (or zip's) name and
+take the Amount slider (0–200 %) like the built-in looks. The LUT is applied to the finished, display-encoded colour
+(trilinear; `DOMAIN_MIN` / `DOMAIN_MAX` honoured; 1D LUTs are not supported); photos with a LUT profile render on the
+CPU. A library on disk keeps a copy of each file in its `Profiles/` folder. Adobe's own profile formats (`.dcp`, XMP
+camera/creative profiles with embedded tables) are deliberately not read.

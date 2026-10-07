@@ -5,14 +5,23 @@
 //!   snapshot — crash-safe and diff-friendly (see [`journal`]);
 //! - **undo/redo**: the engine keeps inverse ops;
 //! - **determinism**: replaying the log reproduces the state exactly (property-tested).
+//!
+//! **Catalog format version** ([`journal::VERSION`], see [`journal`] → *Format versions*): adding
+//! an [`Op`] variant or a serialized field means bumping it. Newer builds read every older format
+//! (and upgrade it on open); older builds refuse a newer library with [`CatalogError::Newer`]
+//! instead of reading part of it.
 #![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod dates;
 pub mod journal;
 pub mod keywords;
+pub mod local;
+pub mod lock;
 pub mod model;
 pub mod query;
 pub mod rules;
+pub mod safe_file;
 pub mod stacks;
 pub mod store;
 
@@ -20,9 +29,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub use dates::{DateRun, GroupBy};
-pub use journal::{Journal, LoadReport, SnapshotPolicy};
+pub use journal::{Journal, LoadReport, PersistStats, SnapshotPolicy, SnapshotTiming};
 pub use keywords::KeywordNode;
 use lightcraft_develop::DevelopSettings;
+pub use local::{DEFAULT_FORGET_DAYS, ForgetPlan, folder_of};
+pub use lock::{LibraryLock, LockError, LockOwner};
 pub use model::*;
 pub use query::{DateGroup, Filter, RatingOp, Sort, SortKey};
 pub use rules::{Match, Rule, RuleSet};
@@ -43,6 +54,10 @@ pub enum CatalogError {
     Corrupt(String),
     #[error("catalog storage: {0}")]
     Io(String),
+    /// The library was written by a newer LightCraft (a newer catalog format, or a change this
+    /// version doesn't know). Nothing was read into the session and nothing was modified.
+    #[error("this library was written by a newer version of LightCraft ({0}); update LightCraft to open it. The library was left unchanged.")]
+    Newer(String),
 }
 
 pub type Result<T> = std::result::Result<T, CatalogError>;
@@ -149,6 +164,11 @@ pub enum Op {
         id: PhotoId,
         captured: Option<String>,
     },
+    /// Assisted culling scores.
+    SetAnalysis {
+        id: PhotoId,
+        analysis: Option<crate::Analysis>,
+    },
     /// Rename a photo: its file name and the source it points to. Applying the op never touches
     /// the disk — the engine moves the file before it commits (and on undo/redo).
     SetFile {
@@ -174,11 +194,21 @@ pub enum Op {
         file_size: u64,
         #[serde(default)]
         content_hash: Option<String>,
+        /// Why the file can only be shown from its embedded preview (see [`Photo::preview_only`]);
+        /// `None` = its raw data decodes (or it isn't a raw).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview_only: Option<String>,
     },
     /// The name shown for a colour label (`None` = its colour's name).
     SetLabelName {
         label: ColorLabel,
         name: Option<String>,
+    },
+    /// When a Local folder was last browsed (ISO 8601; `None` = forget the time). Not an undo
+    /// step: it drives forgetting untouched Local records (see [`local`]).
+    SetBrowsed {
+        folder: String,
+        at: Option<String>,
     },
     /// Several ops as one step (undo applies the inverses in reverse).
     Batch {
@@ -199,6 +229,9 @@ pub struct Catalog {
     /// Custom colour label names.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     label_names: BTreeMap<ColorLabel, String>,
+    /// When each Local folder was last browsed (folder path → ISO 8601), see [`local`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    browsed: BTreeMap<String, String>,
     /// Increments on every applied op.
     #[serde(skip)]
     pub revision: u64,
@@ -280,7 +313,8 @@ impl Catalog {
     /// Number of photos shown for an album in the sources list (excludes deleted photos).
     pub fn album_count(&self, id: AlbumId) -> usize {
         match self.albums.get(&id) {
-            Some(Album { smart: Some(_), .. }) => self.album_photos(id).len(),
+            // counted in place: no id list is built just for its length
+            Some(Album { smart: Some(_), .. }) => self.photos.values().filter(|p| self.album_contains(id, p)).count(),
             Some(a) => a.photos.iter().filter(|p| self.photos.get(p).is_some_and(|p| !p.deleted)).count(),
             None => 0,
         }
@@ -490,6 +524,10 @@ impl Catalog {
                 s.collapsed = collapsed;
                 old
             }
+            Op::SetAnalysis { id, analysis } => {
+                let p = self.photo_mut(id)?;
+                Op::SetAnalysis { id, analysis: std::mem::replace(&mut p.analysis, analysis) }
+            }
             Op::SetCaptured { id, captured } => {
                 if let Some(c) = &captured
                     && stacks::iso_seconds(c).is_none()
@@ -505,7 +543,7 @@ impl Catalog {
                 let old_format = format.map(|f| std::mem::replace(&mut p.format, f));
                 Op::Relink { id, file_name: old_name, source: std::mem::replace(&mut p.source, source), format: old_format }
             }
-            Op::SetContent { id, width, height, file_size, content_hash } => {
+            Op::SetContent { id, width, height, file_size, content_hash, preview_only } => {
                 let p = self.photo_mut(id)?;
                 Op::SetContent {
                     id,
@@ -513,6 +551,7 @@ impl Catalog {
                     height: std::mem::replace(&mut p.height, height),
                     file_size: std::mem::replace(&mut p.file_size, file_size),
                     content_hash: std::mem::replace(&mut p.content_hash, content_hash),
+                    preview_only: std::mem::replace(&mut p.preview_only, preview_only),
                 }
             }
             Op::SetFile { id, file_name, source } => {
@@ -530,6 +569,14 @@ impl Catalog {
                     None => self.label_names.remove(&label),
                 };
                 Op::SetLabelName { label, name: old }
+            }
+            Op::SetBrowsed { folder, at } => {
+                let folder = crate::query::folder_key(&folder);
+                let old = match at {
+                    Some(t) => self.browsed.insert(folder.clone(), t),
+                    None => self.browsed.remove(&folder),
+                };
+                Op::SetBrowsed { folder, at: old }
             }
             Op::Batch { ops } => {
                 let mut inverses = Vec::with_capacity(ops.len());
@@ -606,4 +653,14 @@ impl Catalog {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_background;
+#[cfg(test)]
+mod tests_format_version;
+#[cfg(test)]
 mod tests_journal;
+#[cfg(test)]
+mod tests_local;
+#[cfg(test)]
+mod tests_lock;
+#[cfg(test)]
+mod tests_torn_append;

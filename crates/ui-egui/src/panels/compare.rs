@@ -263,10 +263,10 @@ pub fn show_compare(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             app.ui.zoom = if app.ui.zoom == Zoom::Fit { Zoom::Percent(100) } else { Zoom::Fit };
         }
         resp.context_menu(|ui| {
-            if ui.button("Swap").clicked() {
+            if ui.button(crate::i18n::tr("Swap")).clicked() {
                 let _ = swap(app);
             }
-            if ui.button("Make Candidate the Select").clicked() {
+            if ui.button(crate::i18n::tr("Make Candidate the Select")).clicked() {
                 let _ = make_select(app);
             }
             ui.separator();
@@ -321,7 +321,7 @@ pub fn show_survey(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         // remove from the survey (deselect) on hover
         if resp.hovered() && photos.len() > 1 {
             let xr = Rect::from_min_size(pos2(img.right() - 26.0, img.top() + 6.0), vec2(20.0, 20.0));
-            let xresp = ui.interact(xr, egui::Id::new(("survey-x", id.0)), Sense::click()).on_hover_text("Remove from survey");
+            let xresp = ui.interact(xr, egui::Id::new(("survey-x", id.0)), Sense::click()).on_hover_text(crate::i18n::tr("Remove from survey"));
             ui.painter().circle_filled(xr.center(), 10.0, Color32::from_black_alpha(if xresp.hovered() { 230 } else { 160 }));
             paint(ui.painter(), xr.shrink(4.0), Icon::Close, t.text);
             if xresp.clicked() {
@@ -331,9 +331,40 @@ pub fn show_survey(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         resp.context_menu(|ui| super::grid::context_menu(app, ui, *id));
     }
     let n = photos.len();
-    let msg =
-        if app.session.selection.ids.len() > SURVEY_MAX { format!("Showing {n} of {}", app.session.selection.ids.len()) } else { String::new() };
+    let msg = if app.session.selection.ids.len() > SURVEY_MAX {
+        crate::i18n::tr_format!("Showing {n} of {}", app.session.selection.ids.len(), n = n)
+    } else {
+        String::new()
+    };
     if !msg.is_empty() {
         ui.painter().text(pos2(canvas.right() - 16.0, canvas.top() + 10.0), Align2::RIGHT_TOP, msg, t.font(12.0), t.text_dim);
     }
+}
+
+/// Reference view: the reference photo (left, fixed) beside the active photo (right) — the one
+/// the Edit panel works on, so a look can be matched by eye.
+pub fn show_reference(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    let canvas = area_and_filmstrip(app, ui);
+    let reference = app.ui.reference.map(PhotoId).filter(|r| app.session.catalog.photo(*r).is_some());
+    let (Some(r), Some(active)) = (reference, app.session.active()) else {
+        super::empty_message(ui, canvas, "No reference photo", "Right-click a photo ▸ Set as Reference Photo, then View → Reference View (Shift+R)");
+        return;
+    };
+    let area = canvas.shrink(18.0);
+    let half = (area.width() - 16.0) / 2.0;
+    let zoom = app.ui.zoom;
+    let left = Rect::from_min_size(area.min, vec2(half, area.height()));
+    let right = Rect::from_min_size(pos2(area.right() - half, area.top()), vec2(half, area.height()));
+    let (_, lresp) = photo_tile(app, ui, r, Slot::Compare(0), left, "Reference", zoom);
+    let (img, resp) = photo_tile(app, ui, active, Slot::Compare(1), right, "Active", zoom);
+    app.image_rect = Some(img);
+    pan(app, &resp, img);
+    lresp.context_menu(|ui| {
+        if ui.button(crate::i18n::tr("Clear Reference")).clicked() {
+            app.ui.reference = None;
+            app.ui.view = ViewMode::Detail;
+        }
+    });
+    let mid = area.center().x;
+    ui.painter().line_segment([pos2(mid, area.top()), pos2(mid, area.bottom())], Stroke::new(1.0, Tokens::get(ui.ctx()).divider));
 }
