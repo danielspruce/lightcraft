@@ -193,6 +193,5 @@ fn sample_warp(@builtin(global_invocation_id) g: vec3<u32>) {
     if (pu(64u) != 0u) {
         v = v * warp_gain(s);
     }
-    let blank = vec3<f32>(BLANK_R, BLANK_G, BLANK_B);
-    put(g.y * w + g.x, blank + (v - blank) * coverage);
+    put(g.y * w + g.x, v);
 }

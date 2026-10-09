@@ -48,7 +48,6 @@ pub(crate) fn note_dialog_bottom(ui: &egui::Ui) {
     }
 }
 
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ImportDialog {
@@ -228,8 +227,6 @@ pub struct ImportTask {
     pub kept: usize,
     undo0: usize,
     first: Option<u64>,
-    preserve_selection: bool,
-    selection_before: lightcraft_engine::Selection,
     /// Reading a folder for the Local view: the photos stay out of the library, and nothing is
     /// selected or announced as added.
     browse: bool,
@@ -536,9 +533,8 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let total = task.progress.total.load(Ordering::Relaxed);
     let done = task.progress.done.load(Ordering::Relaxed);
-    let details = task.progress.details.lock().map(|d| d.clone()).unwrap_or_default();
     let text = if total == 0 {
-        if task.browse { crate::i18n::tr("Reading folder…") } else { format!("Finding photos · {} found", task.progress.found.load(Ordering::Relaxed)) }
+        if task.browse { "Reading folder…" } else { "Looking for photos…" }.to_string()
     } else {
         crate::i18n::tr_format!("Reading photos… {done} of {total}", done = done, total = total)
     };
@@ -547,13 +543,10 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
         .title_bar(false)
         .resizable(false)
         .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
-        .fixed_size([620.0, 146.0])
+        .fixed_size([340.0, 80.0])
         .show(ctx, |ui| {
             ui.label(egui::RichText::new(text).color(t.text));
             ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(320.0));
-            for path in details.recent_paths.iter().rev() {
-                ui.add(egui::Label::new(egui::RichText::new(path).small().color(t.text_dim)).truncate()).on_hover_text(path);
-            }
             let r = ui.button(crate::i18n::tr("Cancel"));
             register(ui.ctx(), "button:scanCancel", r.rect);
             cancel = r.clicked();
@@ -570,7 +563,6 @@ impl ScanTask {
     pub fn status(&self) -> Value {
         json!({"done": self.progress.done.load(Ordering::Relaxed), "total": self.progress.total.load(Ordering::Relaxed)})
     }
-}
 }
 
 /// Start importing the dialog's checked files (the dialog's OK / `ui.dialog.confirm`).
@@ -624,8 +616,6 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
     if d.auto_without_xmp {
         task.keep_selection = Some(app.session.selection.clone());
     }
-    task.preserve_selection = d.auto_without_xmp;
-    task.selection_before = app.session.selection.clone();
     app.import = Some(task);
     app.renderer.forget_imports();
     Ok(json!({"importing": total}))
@@ -671,9 +661,6 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     let finished = batches.is_none();
     for prepared in batches.into_iter().flatten() {
         commit_batch(app, &mut task, prepared);
-        if task.preserve_selection {
-            app.session.selection = task.selection_before.clone();
-        }
         // arriving photos don't take over the selection
         if let Some(sel) = &task.keep_selection {
             app.session.selection = sel.clone();
@@ -745,17 +732,13 @@ fn finish(app: &mut LightcraftApp, ctx: &egui::Context, task: ImportTask) {
         }
         return;
     }
-    let task = app.import.take().expect("import task");
-    let steps = app.session.undo.len().saturating_sub(task.undo0);
-    let label = format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
-    app.session.merge_undo(steps, &label);
     if task.browse {
         if task.failed > 0 {
             app.toast(ctx, crate::i18n::tr_format!("{} photo{} not readable", task.failed, if task.failed == 1 { "" } else { "s" }));
         }
         return;
     }
-    if !task.preserve_selection
+    if task.keep_selection.is_none()
         && let Some(f) = task.first
     {
         let _ = app.run("library.select", json!({"ids": [f]}));
@@ -1454,6 +1437,16 @@ fn field<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_import_uses_the_task_taken_by_tick() {
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        app.import = Some(ImportTask::new(Vec::new(), json!({"mode": "add"}), 0, false));
+        let task = app.import.take().unwrap();
+        finish(&mut app, &ctx, task);
+        assert!(app.import.is_none());
+    }
 
     #[test]
     fn grid_height_follows_the_window() {

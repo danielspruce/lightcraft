@@ -57,32 +57,6 @@ fn auto_import_leaves_existing_xmp_edits_intact() {
 }
 
 #[test]
-fn worker_scan_reports_recent_paths_and_reuses_probes() {
-    let src = temp_dir("scan-merge");
-    for seed in 0..5 {
-        write_png(&src.join(format!("{seed}.png")), seed);
-    }
-    let mut s = Session::new().with_fs();
-    let (input, paths) = crate::import::ScanInput::new(&mut s, &[src.to_string_lossy().into_owned()]);
-    let progress = crate::import::ScanProgress::default();
-    let output = crate::import::scan_with(input, &paths, &progress);
-    assert_eq!(output.candidates.len(), 5);
-    assert_eq!(output.probes.len(), 5);
-    assert_eq!(progress.found.load(std::sync::atomic::Ordering::Relaxed), 5);
-    assert_eq!(progress.done.load(std::sync::atomic::Ordering::Relaxed), 5);
-    let details = progress.details.lock().unwrap();
-    assert_eq!(details.phase, "Checking photos");
-    assert_eq!(details.recent_paths.len(), 3);
-    drop(details);
-    s.import_probes = output.probes;
-    let (input, paths) = crate::import::ScanInput::new(&mut s, &paths);
-    let output = crate::import::scan_with(input, &paths, &crate::import::ScanProgress::default());
-    assert_eq!(output.candidates.len(), 5);
-    assert!(output.candidates.iter().all(|c| c.error.is_none()));
-    let _ = std::fs::remove_dir_all(src);
-}
-
-#[test]
 fn recursive_import_with_duplicates() {
     let src = temp_dir("src");
     write_png(&src.join("a.png"), 1);

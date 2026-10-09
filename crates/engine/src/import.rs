@@ -323,39 +323,19 @@ pub fn is_supported(path: &Path) -> bool {
 /// is never descended into. Each folder's walk is bounded ([`crate::walk::Limits::default`]); a
 /// walk that stops at a bound is logged.
 pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
-    expand_with_progress(paths, skip, None)
+    expand_within(paths, skip, crate::walk::Limits::default()).0
 }
 
-fn expand_with_progress(paths: &[String], skip: Option<&Path>, progress: Option<&ScanProgress>) -> Vec<String> {
-    expand_within_with_progress(paths, skip, crate::walk::Limits::default(), progress).0
-}
-
-/// [`expand`] with the walk bounded by `limits` -> (files, whether a walk stopped at a bound).
+/// [`expand`] with the walk bounded by `limits` → (files, whether a walk stopped at a bound).
 pub fn expand_within(paths: &[String], skip: Option<&Path>, limits: crate::walk::Limits) -> (Vec<String>, bool) {
-    expand_within_with_progress(paths, skip, limits, None)
-}
-
-fn expand_within_with_progress(
-    paths: &[String],
-    skip: Option<&Path>,
-    limits: crate::walk::Limits,
-    progress: Option<&ScanProgress>,
-) -> (Vec<String>, bool) {
-    use std::sync::atomic::Ordering::Relaxed;
     let mut out = Vec::new();
     let mut truncated = false;
     for p in paths {
-        if progress.is_some_and(|progress| progress.cancel.load(Relaxed)) {
-            break;
-        }
         let p = Path::new(p);
         if skip.is_some_and(|s| p == s) {
             continue;
         }
         if p.is_dir() {
-            if let Some(progress) = progress {
-                progress.update("Finding photos", p);
-            }
             let w = crate::walk::files_in(p, skip, limits, is_supported);
             if w.truncated {
                 log::warn!(
@@ -365,16 +345,12 @@ fn expand_within_with_progress(
                     limits.max_entries,
                     limits.max_depth
                 );
-
             }
             truncated |= w.truncated;
             out.extend(w.files.into_iter().map(|f| f.to_string_lossy().to_string()));
         } else {
             // explicitly named files are attempted even with an unknown extension (sniffed)
             out.push(p.to_string_lossy().to_string());
-            if let Some(progress) = progress {
-                progress.found.store(out.len(), std::sync::atomic::Ordering::Relaxed);
-            }
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -441,18 +417,6 @@ pub(crate) fn probe_paths(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo
     probe_all(s.media.file_probe.as_ref(), paths, &ScanProgress::default())
 }
 
-fn probe_all_with_progress(s: &Session, paths: &[String], progress: Option<&ImportScanProgressState>) -> Vec<Result<ProbeInfo, String>> {
-    if let Some(progress) = progress {
-        progress_update(progress, "Checking photos", 0, paths.len(), "");
-    }
-    let out = probe_paths(s, paths);
-    if let Some(progress) = progress {
-        progress_update(progress, "Checking photos", paths.len(), paths.len(), "");
-    }
-    out
-}
-
-
 fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress: &ScanProgress) -> Vec<Result<ProbeInfo, String>> {
     use std::sync::atomic::Ordering::Relaxed;
     let Some(probe) = probe.cloned() else {
@@ -484,7 +448,6 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                             if progress.cancel.load(Relaxed) {
                                 break;
                             }
-                            progress.update("Checking photos", Path::new(&paths[i]));
                             let r = probe(&paths[i]);
                             progress.done.fetch_add(1, Relaxed);
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
@@ -501,7 +464,6 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
             if progress.cancel.load(Relaxed) {
                 return Err("cancelled".into());
             }
-            progress.update("Checking photos", Path::new(p));
             let r = probe(p);
             progress.done.fetch_add(1, Relaxed);
             r
@@ -539,29 +501,6 @@ pub struct ScanProgress {
     pub total: std::sync::atomic::AtomicUsize,
     pub done: std::sync::atomic::AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
-    pub found: std::sync::atomic::AtomicUsize,
-    pub details: std::sync::Mutex<ScanDetails>,
-}
-
-/// Current scan phase and a bounded list of recently visited paths.
-#[derive(Clone, Debug, Default)]
-pub struct ScanDetails {
-    pub phase: String,
-    pub recent_paths: Vec<String>,
-}
-
-impl ScanProgress {
-    fn update(&self, phase: &str, path: &Path) {
-        let Ok(mut details) = self.details.lock() else { return };
-        details.phase = phase.into();
-        let path = path.to_string_lossy().into_owned();
-        if details.recent_paths.last() != Some(&path) {
-            details.recent_paths.push(path);
-            if details.recent_paths.len() > 3 {
-                details.recent_paths.remove(0);
-            }
-        }
-    }
 }
 
 /// The result of [`scan_with`]: the candidates, and the probes to keep for the import that follows.
@@ -610,38 +549,11 @@ pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
     out.candidates
 }
 
-/// Scan paths while excluding an optional library directory. The UI uses this with a lightweight
-/// session snapshot so folder traversal and file probing can run away from the UI thread.
-pub fn scan_with_skip(s: &mut Session, paths: &[String], skip: Option<&Path>) -> Vec<ImportCandidate> {
-    scan_with_progress(s, paths, skip, None)
-}
-
-/// Scan paths and publish progress while expanding folders and probing images.
-pub fn scan_with_progress(
-    s: &mut Session,
-    paths: &[String],
-    skip: Option<&Path>,
-    progress: Option<&ImportScanProgressState>,
-) -> Vec<ImportCandidate> {
-    let (mut input, paths) = ScanInput::new(s, paths);
-    input.skip = skip.map(Path::to_path_buf);
-    if let Some(progress) = progress {
-        progress_update(progress, "Finding photos", 0, 0, "");
-    }
-
-    let out = scan_with(input, &paths, &ScanProgress::default());
-    if let Some(progress) = progress {
-        progress_update(progress, "Checking photos", out.candidates.len(), out.candidates.len(), "");
-    }
-    s.import_probes = out.probes;
-    out.candidates
-}
-
 /// [`scan`] without the session, so it can run on a worker thread. Stops early (returning what it
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
-    let files = expand_with_progress(paths, input.skip.as_deref(), Some(progress));
+    let files = expand(paths, input.skip.as_deref());
     let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
     progress.total.store(todo.len(), Relaxed);
     // probes from a preceding `scan` are reused when the file is unchanged (same size)
