@@ -232,6 +232,7 @@ fn overlaps_existing(f: &Face, regions: &[Region]) -> bool {
     })
 }
 
+/// Recognize replaceable detector results while retaining explicitly ignored regions.
 pub(crate) fn is_detected(r: &Region) -> bool {
     r.kind != RegionKind::IgnoredFace && r.description.as_deref().is_some_and(|d| d.starts_with(MARK))
 }
@@ -246,6 +247,7 @@ pub(crate) fn render_rgb(s: &mut Session, id: lightcraft_catalog::PhotoId, edge:
     Ok((rgb, image.width, image.height))
 }
 
+/// Detect selected photos and commit new face regions without automatic sidecar writes.
 fn detect(s: &mut Session, p: &Value) -> Result<Value> {
     let apply = p.get("apply").and_then(Value::as_bool).unwrap_or(true);
     let defaults = Options::default();

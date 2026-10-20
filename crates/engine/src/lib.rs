@@ -759,10 +759,12 @@ impl Session {
         Ok(())
     }
 
+    /// Undo the latest step using the real filesystem; retain the step if applying it fails.
     pub fn undo_step(&mut self) -> Result<String> {
         self.undo_step_with(&rename::RealFs)
     }
 
+    /// Undo a catalog/filesystem step while preserving its sidecar-write policy and retry state.
     pub(crate) fn undo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
         let mut e = self.undo.pop().ok_or_else(|| EngineError::Other("nothing to undo".into()))?;
         let redo = match self.apply_with_files(&mut e, fs) {
@@ -788,10 +790,12 @@ impl Session {
         Ok(e.label)
     }
 
+    /// Redo the latest undone step using the real filesystem without changing its history policy.
     pub fn redo_step(&mut self) -> Result<String> {
         self.redo_step_with(&rename::RealFs)
     }
 
+    /// Redo a catalog/filesystem step with the same sidecar-write policy as the original operation.
     pub(crate) fn redo_step_with(&mut self, fs: &dyn rename::MoveFs) -> Result<String> {
         let mut e = self.redo.pop().ok_or_else(|| EngineError::Other("nothing to redo".into()))?;
         let undo = match self.apply_with_files(&mut e, fs) {

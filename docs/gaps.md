@@ -139,3 +139,4 @@ Persistent ignore/restore excludes blurry crops and false detections from recogn
 | 2026-10-14 | minor | Gap 10 shrinks: 97 Canon CR2, Pentax and Ricoh models verified on one CC0 file each (334 models, ~50% on a verified body) |
 | 2026-10-14 | minor | Gap 10: 515 of 1,446 models verified (36%), ~84% of photographers on a verified body (integration batch 36) |
 | 2026-10-21 | minor | LRC-LIB-PEOPLE: persistent Ignore Faces, standalone restore review, format-10 migration and catalog-only history; partial status and counts unchanged |
+| 2026-10-21 | patch | LRC-LIB-PEOPLE: refresh ignored review by catalog revision, cover direct-session deletion/restoration, and clarify ignore/rename documentation; counts unchanged |

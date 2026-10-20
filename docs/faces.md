@@ -328,6 +328,8 @@ Hover a suggestion or focus it with the keyboard and press `A` for the same acti
 suggestions below that score, previously confirmed faces and hidden suggestions stay as they were. Nothing is named
 without this explicit action.
 
+Renaming or merging a person updates names retained on ignored faces while keeping them ignored. Restoring them uses the updated name.
+
 For blurry crops or false detections, use **Ignore selected faces** in the
 Unnamed faces naming bar, or a person's selection toolbar. A person's face tiles (including More)
 also offer **Ignore face (blurry / not a face)** on right-click. Ignoring is persistent, catalog-only,
@@ -343,9 +345,7 @@ and `faces.ignored {}`. Supplying `rect` protects against stale selections; inva
 
 Face naming, ignore/restore, and face-box edits remain catalog-only through
 Undo and Redo, even when automatic XMP writing is enabled. They do not mark photos as developed
-or add develop-history entries. Undo/Redo and face-metadata commands refresh the ignored-face
-review; selections are cleared so stale region indices cannot
-be reused.
+or add develop-history entries. The ignored-face review refreshes whenever the catalog revision changes, including direct-session commands and deletion/restoration. Selections are cleared so stale region indices cannot be reused.
 
 Ignored faces require **catalog format 10**. Opening an existing format-9 library upgrades its
 catalog automatically, preserving existing assignments and ignored regions. Older builds then
@@ -410,5 +410,3 @@ sensor dust. Eyes, brows, nostrils and the mouth are cut out around the landmark
 the 1600 px analysis image get nothing, as do faces with more than 12 candidates (stubble, freckles and pores are
 texture, not blemishes); at most six per face. It needs no model beyond the detector and never changes anything
 without a spot you can see and delete (`crates/pipeline/src/blemish.rs`).
-
-Renaming or merging a person updates names retained on ignored faces while keeping them ignored. Restoring them uses the updated name.

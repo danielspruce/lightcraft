@@ -56,6 +56,7 @@ pub(super) fn fit(painter: &egui::Painter, text: &str, font: egui::FontId, max_w
     (1..chars.len()).rev().map(|n| chars[..n].iter().collect::<String>() + "…").find(|s| width(s) <= max_w).unwrap_or_else(|| "…".to_string())
 }
 
+/// Show named people and unnamed crops, or dispatch the active face-review screen.
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     if app.ui.ignored_faces.is_some() {
         super::ignored_faces::show(app, ui);

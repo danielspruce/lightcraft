@@ -47,6 +47,7 @@ fn only(s: &Session) -> PhotoId {
     s.catalog.photos().next().unwrap().id
 }
 
+/// Face metadata history preserves original bytes, sidecars and every developed-state marker.
 #[test]
 fn face_history_never_writes_sidecars_or_marks_photos_edited() {
     use lightcraft_meta::{Region, RegionKind};

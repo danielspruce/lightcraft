@@ -10,6 +10,7 @@ use crate::{LightcraftApp, widgets::register};
 pub struct View {
     faces: Option<std::sync::Arc<Vec<Value>>>,
     selected: HashSet<(u64, usize)>,
+    revision: Option<u64>,
     anchor: Option<(usize, bool)>,
     error: Option<String>,
 }
@@ -29,6 +30,10 @@ fn key(face: &Value) -> Option<(u64, usize)> {
 /// Show retained crops without loading a recognition model or constructing unnamed groups.
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let Some(mut view) = app.ui.ignored_faces.take() else { return };
+    if view.revision.is_some_and(|revision| revision != app.session.catalog.revision) {
+        view.invalidate();
+    }
+    view.revision = Some(app.session.catalog.revision);
     let mut back = false;
     egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -43,6 +48,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             }
         });
         if view.faces.is_none() && view.error.is_none() {
+            view.revision = Some(app.session.catalog.revision);
             match app.session.execute("faces.ignored", &json!({})) {
                 Ok(response) => view.faces = Some(std::sync::Arc::new(response["faces"].as_array().cloned().unwrap_or_default())),
                 Err(error) => view.error = Some(error.to_string()),
@@ -54,7 +60,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let faces = view.faces.clone().unwrap_or_default();
         let mut restore = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("{} ignored faces · {} selected", faces.len(), view.selected.len()));
+            ui.label(format!("Ignored faces: {} · Selected: {}", faces.len(), view.selected.len()));
             let button = ui.button("Select all");
             register(ui.ctx(), "ignoredFaces:selectAll", button.rect);
             if button.clicked() {
@@ -181,7 +187,27 @@ mod tests {
         assert!(h.app.ui.ignored_faces.as_ref().unwrap().faces.as_ref().unwrap().is_empty());
         h.app.run("edit.undo", json!({})).unwrap();
         h.step();
+        // Direct session calls bypass the UI command hook, including library membership changes.
+        h.app.session.selection = lightcraft_engine::Selection::single(id);
+        let selected = h.request("ui.clickWidget", json!({"id": "ignoredFaces:selectAll"}), timeout);
+        assert_eq!(selected["ok"], true);
+        h.step();
+        assert_eq!(h.app.ui.ignored_faces.as_ref().unwrap().selected.len(), 1);
+        h.app.session.execute("photo.delete", &json!({"ids": [id.0]})).unwrap();
+        h.step();
+        assert!(h.app.ui.ignored_faces.as_ref().unwrap().faces.as_ref().unwrap().is_empty());
+        assert!(h.app.ui.ignored_faces.as_ref().unwrap().selected.is_empty());
+        h.app.session.execute("photo.restore", &json!({"ids": [id.0]})).unwrap();
+        h.step();
+        assert_eq!(h.app.ui.ignored_faces.as_ref().unwrap().faces.as_ref().unwrap().len(), 1);
+        h.app.session.execute("faces.ignore", &json!({"faces": [{"photo": id.0, "index": 0}], "ignored": false})).unwrap();
+        h.step();
+        assert!(h.app.ui.ignored_faces.as_ref().unwrap().faces.as_ref().unwrap().is_empty());
+        h.app.session.execute("edit.undo", &json!({})).unwrap();
+        h.step();
         if let Some(path) = std::env::var_os("LIGHTCRAFT_IGNORED_SCREENSHOT") {
+            let inspected = h.request("ui.inspect", json!({}), timeout);
+            println!("Ignored-face review perf: {}", inspected["result"]["perf"]);
             let shot = h.snapshot(timeout);
             let image = lightcraft_raster::Rgba8::from_fn(shot.size[0], shot.size[1], |x, y| shot.pixels[y * shot.size[0] + x].to_array());
             let png = lightcraft_engine::export::encode_image(

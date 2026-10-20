@@ -1164,6 +1164,7 @@ mod imp {
     }
 }
 
+/// Register face review queries and explicit catalog-only identity mutations.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
