@@ -327,6 +327,30 @@ with an equal or higher similarity score. Its tooltip names the person and shows
 Hover a suggestion or focus it with the keyboard and press `A` for the same action. The batch is one undo step;
 suggestions below that score, previously confirmed faces and hidden suggestions stay as they were. Nothing is named
 without this explicit action.
+
+For blurry crops or false detections, use **Ignore selected faces** in the
+Unnamed faces naming bar, or a person's selection toolbar. A person's face tiles (including More)
+also offer **Ignore face (blurry / not a face)** on right-click. Ignoring is persistent, catalog-only,
+and one undo step per batch. Ignored crops disappear from People, recognition work,
+and the confirmed examples used for matching. Their boxes remain in the catalog to suppress an
+overlapping detection on future scans. Nothing is deleted from the original photo.
+
+Open **Ignored faces…** from People, select faces, then **Restore selected
+faces** to include them again. Restoration preserves the original box, name and description; a
+restored crop returns to the appropriate People view. This review works without
+a recognition model installed. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
+and `faces.ignored {}`. Supplying `rect` protects against stale selections; invalid batches change nothing.
+
+Face naming, ignore/restore, and face-box edits remain catalog-only through
+Undo and Redo, even when automatic XMP writing is enabled. They do not mark photos as developed
+or add develop-history entries. Undo/Redo and face-metadata commands refresh the ignored-face
+review; selections are cleared so stale region indices cannot
+be reused.
+
+Ignored faces require **catalog format 10**. Opening an existing format-9 library upgrades its
+catalog automatically, preserving existing assignments and ignored regions. Older builds then
+refuse the newer format instead of trying to decode it as an older catalog.
+
 **Show photos** puts their photos in the grid; **‹ People** or Escape goes back. "More" only holds faces the scan has
 already embedded, so it fills in as the scan goes; it shows faces scoring above four fifths of the model's suggestion bar,
 since you look at each one before anything is named.
@@ -386,3 +410,5 @@ sensor dust. Eyes, brows, nostrils and the mouth are cut out around the landmark
 the 1600 px analysis image get nothing, as do faces with more than 12 candidates (stubble, freckles and pores are
 texture, not blemishes); at most six per face. It needs no model beyond the detector and never changes anything
 without a spot you can see and delete (`crates/pipeline/src/blemish.rs`).
+
+Renaming or merging a person updates names retained on ignored faces while keeping them ignored. Restoring them uses the updated name.

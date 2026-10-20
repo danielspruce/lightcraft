@@ -57,6 +57,10 @@ pub(super) fn fit(painter: &egui::Painter, text: &str, font: egui::FontId, max_w
 }
 
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    if app.ui.ignored_faces.is_some() {
+        super::ignored_faces::show(app, ui);
+        return;
+    }
     if let Some(name) = app.ui.person_page.clone() {
         return super::person::show(app, ui, &name);
     }
@@ -82,6 +86,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     ui.painter().text(pos2(head.right() - PAD, head.center().y), Align2::RIGHT_CENTER, people.len().to_string(), t.font(13.0), t.text_dim);
     // until face recognition is set up: what it takes, and a button that does the next step
     super::faces::setup_banner(app, ui);
+    let ignored = ui.button("Ignored faces…");
+    register(ui.ctx(), "unnamed:ignored", ignored.rect);
+    if ignored.clicked() {
+        let _ = app.run("view.ignoredFaces", json!({}));
+    }
     // the filters narrowing the list (a date, a keyword…), removable here
     let chips = lightcraft_engine::filter_chips(&app.session.filter, &app.session.catalog);
     super::chips::show(app, ui, &chips);

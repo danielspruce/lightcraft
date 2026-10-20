@@ -16,6 +16,31 @@ use crate::widgets::register;
 const PAD: f32 = 20.0;
 const SECTION_H: f32 = 56.0;
 
+#[derive(Clone, Debug, Default)]
+pub struct Selection {
+    name: String,
+    active: bool,
+    faces: std::collections::HashSet<(u64, usize)>,
+    anchor: Option<(usize, bool)>,
+}
+
+/// Repeat the anchor's include/exclude action over a range of confirmed faces.
+fn select_confirmed(selection: &mut Selection, faces: &[Face], target: &Face, shift: bool) {
+    let Some(index) = faces.iter().position(|f| f.photo == target.photo && f.index == target.index) else { return };
+    let key = (target.photo, target.index);
+    let (start, selecting) = selection.anchor.filter(|_| shift).unwrap_or((index, !selection.faces.contains(&key)));
+    for face in faces.get(start.min(index)..=start.max(index)).unwrap_or_default() {
+        if selecting {
+            selection.faces.insert((face.photo, face.index));
+        } else {
+            selection.faces.remove(&(face.photo, face.index));
+        }
+    }
+    if !shift || selection.anchor.is_none() {
+        selection.anchor = Some((index, selecting));
+    }
+}
+
 /// One face: which photo, which of its regions, the box to show it by, and (for the "More" faces) how alike.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Face {
@@ -37,6 +62,7 @@ pub struct PersonPage {
     pub pending: usize,
 }
 
+/// Parse a tile reference, preferring its detector-aligned display box over the catalog box.
 fn face_of(v: &Value) -> Option<Face> {
     let rect = |r: &Value| Some(lightcraft_geom::Rect { x0: r["x0"].as_f64()?, y0: r["y0"].as_f64()?, x1: r["x1"].as_f64()?, y1: r["y1"].as_f64()? });
     Some(Face {
@@ -85,6 +111,7 @@ enum Hit {
     Confirm,
     ConfirmAbove,
     Dismiss,
+    Ignore,
 }
 
 /// The current, session-visible candidates at or above the selected score. The score, not the tile position, is the
@@ -144,6 +171,13 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
     let now = ui.input(|i| i.time);
     let page = page_for(app, name, now);
     let shown_name = if page.name.is_empty() { name.to_string() } else { page.name.clone() };
+    if app.ui.person_selection.name != shown_name {
+        app.ui.person_selection = Selection { name: shown_name.clone(), ..Default::default() };
+    }
+    if !app.ui.person_selection.faces.is_empty() {
+        let valid: std::collections::HashSet<_> = page.confirmed.iter().map(|f| (f.photo, f.index)).collect();
+        app.ui.person_selection.faces.retain(|key| valid.contains(key));
+    }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.add_space(PAD - 4.0);
@@ -171,6 +205,46 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
         });
     });
     ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(PAD);
+        let active = app.ui.person_selection.active;
+        let button = ui.button(if active { "Done selecting" } else { "Select faces…" });
+        register(ui.ctx(), "person:selectFaces", button.rect);
+        if button.clicked() {
+            app.ui.person_selection.active = !active;
+            app.ui.person_selection.faces.clear();
+            app.ui.person_selection.anchor = None;
+        }
+        if app.ui.person_selection.active {
+            let all = ui.button("Select all");
+            register(ui.ctx(), "person:selectAll", all.rect);
+            if all.clicked() {
+                app.ui.person_selection.faces.extend(page.confirmed.iter().map(|f| (f.photo, f.index)));
+            }
+            let clear = ui.button("Clear selection");
+            register(ui.ctx(), "person:clearSelection", clear.rect);
+            if clear.clicked() {
+                app.ui.person_selection.faces.clear();
+                app.ui.person_selection.anchor = None;
+            }
+            let count = app.ui.person_selection.faces.len();
+            let ignore = ui.add_enabled(count > 0, egui::Button::new("Ignore selected faces"));
+            register(ui.ctx(), "person:ignoreSelected", ignore.rect);
+            if ignore.clicked() {
+                let faces: Vec<_> = app.ui.person_selection.faces.iter().map(|(photo, index)| json!({"photo": photo, "index": index})).collect();
+                match app.run("faces.ignore", json!({"faces": faces})) {
+                    Ok(_) => {
+                        app.ui.person_selection.faces.clear();
+                        app.ui.person_selection.anchor = None;
+                    }
+                    Err(error) => app.toast(ui.ctx(), error),
+                }
+            }
+        }
+    });
+    if app.ui.person_selection.active {
+        ui.label("Click faces to select or deselect. Shift-click extends that action to a range. Double-click opens a photo.");
+    }
     if page.total == 0 {
         super::empty_message(
             ui,
@@ -220,8 +294,21 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
                 let Some(f) = page.confirmed.get(row * cols + col) else { break };
                 shown += 1;
                 let min = area.min + vec2(PAD + col as f32 * (edge + super::people::TILE_GAP), PAD + row as f32 * row_h);
-                if let Hit::Open = tile(app, ui, Rect::from_min_size(min, vec2(edge, edge)), f, ppp, false, &shown_name, 0) {
-                    hit = Some((Hit::Open, f.clone()));
+                let action = tile(app, ui, Rect::from_min_size(min, vec2(edge, edge)), f, ppp, false, &shown_name, 0);
+                if action == Hit::Ignore {
+                    hit = Some((action, f.clone()));
+                } else if action == Hit::Open {
+                    if app.ui.person_selection.active && !ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                        select_confirmed(&mut app.ui.person_selection, &page.confirmed, f, ui.input(|i| i.modifiers.shift));
+                    } else {
+                        hit = Some((Hit::Open, f.clone()));
+                    }
+                }
+                if app.ui.person_selection.active && app.ui.person_selection.faces.contains(&(f.photo, f.index)) {
+                    let rect = Rect::from_min_size(min, vec2(edge, edge));
+                    ui.painter().rect_stroke(rect.shrink(1.0), 3.0, Stroke::new(3.0, t.accent), StrokeKind::Inside);
+                    ui.painter().rect_filled(Rect::from_min_size(min, vec2(24.0, 24.0)), 3.0, t.accent);
+                    ui.painter().text(min + vec2(12.0, 12.0), Align2::CENTER_CENTER, "✓", t.font(16.0), Color32::WHITE);
                 }
             }
         }
@@ -257,6 +344,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
                     Hit::Confirm => hit = Some((Hit::Confirm, (*f).clone())),
                     Hit::ConfirmAbove => hit = Some((Hit::ConfirmAbove, (*f).clone())),
                     Hit::Dismiss => hit = Some((Hit::Dismiss, (*f).clone())),
+                    Hit::Ignore => hit = Some((Hit::Ignore, (*f).clone())),
                     _ => {}
                 }
             }
@@ -280,6 +368,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
             Hit::ConfirmAbove => confirm_above(app, ui.ctx(), &shown_name, &more, f.score),
             Hit::Dismiss => {
                 app.ui.dismissed_faces.insert((f.photo, f.index));
+            }
+            Hit::Ignore => {
+                if let Err(error) = app.run("faces.ignore", json!({"faces": [{"photo": f.photo, "index": f.index}]})) {
+                    app.toast(ui.ctx(), error);
+                }
             }
             Hit::Nothing => {}
         }
@@ -314,6 +407,14 @@ fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, r: Rect, f: &Face, ppp: f32,
         p.rect_stroke(r, 3.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
     }
     let mut hit = Hit::Nothing;
+    resp.context_menu(|ui| {
+        let button = ui.button("Ignore face (blurry / not a face)");
+        register(ui.ctx(), "person:ignoreFace", button.rect);
+        if button.clicked() {
+            hit = Hit::Ignore;
+            ui.close();
+        }
+    });
     if more && hovered {
         // a check at the bottom right says a click confirms; × hides and ↑ names all above this score
         let badge = Rect::from_min_size(pos2(r.right() - 28.0, r.bottom() - 28.0), vec2(24.0, 24.0));
@@ -360,6 +461,83 @@ fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, r: Rect, f: &Face, ppp: f32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The suggested-face context menu must persist ignoring, without confirming the suggestion.
+    #[test]
+    fn more_face_context_menu_ignores_the_suggestion_with_one_undo() {
+        use std::time::Duration;
+        let t = Duration::from_secs(15);
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), crate::Services::default());
+        let ids: Vec<_> = app.session.catalog.photos().map(|p| p.id).take(2).collect();
+        assert_eq!(ids.len(), 2);
+        let rect = lightcraft_geom::Rect { x0: 0.2, y0: 0.2, x1: 0.6, y1: 0.6 };
+        for (i, id) in ids.iter().enumerate() {
+            let mut meta = app.session.catalog.photo(*id).unwrap().meta.clone();
+            meta.regions = vec![lightcraft_meta::Region {
+                rect,
+                kind: lightcraft_meta::RegionKind::Face,
+                name: (i == 0).then(|| "Person".into()),
+                description: None,
+            }];
+            app.session.commit("setup", lightcraft_catalog::Op::SetMeta { id: *id, meta: Box::new(meta) }).unwrap();
+        }
+        let mut h = crate::headless::Headless::new(app, [1400.0, 900.0], 1.0);
+        h.step();
+        h.app.run("view.person", json!({"name": "Person"})).unwrap();
+        let page = PersonPage {
+            name: "Person".into(),
+            total: 1,
+            confirmed: vec![Face { photo: ids[0].0, index: 0, rect, score: 0.0 }],
+            more: vec![Face { photo: ids[1].0, index: 0, rect, score: 0.8 }],
+            ready: true,
+            pending: 0,
+        };
+        h.app.caches.person_page = Some(("Person".into(), h.app.session.catalog.revision, h.app.caches.faces_indexed, h.time(), Arc::new(page)));
+        h.settle(t);
+        let menu = h.request("ui.clickWidget", json!({"id": format!("more-face:{}:0", ids[1].0), "button": "right"}), t);
+        assert_eq!(menu["ok"], true, "{menu}");
+        h.step();
+        if let Some(path) = std::env::var_os("LIGHTCRAFT_MORE_IGNORE_SCREENSHOT") {
+            let shot = h.snapshot(t);
+            let image = lightcraft_raster::Rgba8::from_fn(shot.size[0], shot.size[1], |x, y| shot.pixels[y * shot.size[0] + x].to_array());
+            let png = lightcraft_engine::export::encode_image(
+                &image,
+                &lightcraft_engine::export::ExportOptions { format: lightcraft_engine::export::ExportFormat::Png, ..Default::default() },
+            )
+            .unwrap();
+            std::fs::write(path, png).unwrap();
+        }
+        let undo = h.app.session.undo.len();
+        let ignored = h.request("ui.clickWidget", json!({"id": "person:ignoreFace"}), t);
+        assert_eq!(ignored["ok"], true, "{ignored}");
+        h.step();
+        h.settle(t);
+        let photo = h.app.session.catalog.photo(ids[1]).unwrap();
+        assert_eq!(photo.meta.regions[0].kind, lightcraft_meta::RegionKind::IgnoredFace);
+        assert!(photo.meta.regions[0].name.is_none(), "ignoring must not confirm the suggested name");
+        assert_eq!(photo.meta.regions[0].rect, rect);
+        assert_eq!(h.app.session.undo.len(), undo + 1);
+        assert!(!h.app.widgets.iter().any(|(id, _)| id == &format!("more-face:{}:0", ids[1].0)));
+        assert_eq!(h.app.session.catalog.photo(ids[0]).unwrap().meta.regions[0].name.as_deref(), Some("Person"));
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.catalog.photo(ids[1]).unwrap().meta.regions[0].kind, lightcraft_meta::RegionKind::Face);
+        h.app.run("edit.redo", json!({})).unwrap();
+        assert_eq!(h.app.session.catalog.photo(ids[1]).unwrap().meta.regions[0].kind, lightcraft_meta::RegionKind::IgnoredFace);
+    }
+
+    /// Shift ranges repeat the anchor action for both inclusion and exclusion.
+    #[test]
+    fn confirmed_face_selection_extends_include_and_exclude_ranges() {
+        let faces: Vec<_> =
+            (0..4).map(|photo| Face { photo, index: 0, rect: lightcraft_geom::Rect { x0: 0.0, y0: 0.0, x1: 1.0, y1: 1.0 }, score: 0.0 }).collect();
+        let mut selected = Selection::default();
+        select_confirmed(&mut selected, &faces, &faces[0], false);
+        select_confirmed(&mut selected, &faces, &faces[3], true);
+        assert_eq!(selected.faces.len(), 4);
+        select_confirmed(&mut selected, &faces, &faces[1], false);
+        select_confirmed(&mut selected, &faces, &faces[3], true);
+        assert_eq!(selected.faces, std::collections::HashSet::from([(0, 0)]));
+    }
 
     #[test]
     fn all_above_uses_score_including_later_ties_and_only_visible_faces() {

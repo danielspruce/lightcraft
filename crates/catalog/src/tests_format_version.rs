@@ -28,6 +28,30 @@ fn snapshot_version(m: &MemStore) -> u64 {
     v["version"].as_u64().unwrap()
 }
 
+/// Format 9 upgrades atomically while retaining ignored geometry, assignments and descriptions.
+#[test]
+fn v9_ignored_faces_upgrade_without_losing_assignments_or_boxes() {
+    let (mut base, _, _) = legacy_parts();
+    let id = base.photos().next().unwrap().id;
+    let mut meta = base.photo(id).unwrap().meta.clone();
+    meta.regions = vec![lightcraft_meta::Region {
+        rect: lightcraft_geom::Rect { x0: 0.1, y0: 0.1, x1: 0.4, y1: 0.4 },
+        kind: lightcraft_meta::RegionKind::IgnoredFace,
+        name: Some("Person".into()),
+        description: Some("retained".into()),
+    }];
+    base.apply(Op::SetMeta { id, meta: Box::new(meta.clone()) }).unwrap();
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":9,\"seq\":3,\"catalog\":{}}}\n", base.to_snapshot()).into_bytes());
+    let (_, catalog, report) = Journal::open(Box::new(m.clone())).unwrap();
+    assert_eq!(report.upgraded_from, Some(9));
+    assert!(snapshot_version(&m) > 9, "older builds must refuse this format before decoding ignored faces");
+    assert_eq!(catalog.photo(id).unwrap().meta, meta);
+    let (_, reopened, report) = Journal::open(Box::new(m)).unwrap();
+    assert_eq!(report.upgraded_from, None);
+    assert_eq!(reopened.photo(id).unwrap().meta, meta);
+}
+
 #[test]
 fn v1_library_loads_and_is_upgraded() {
     let (base, log, full) = legacy_parts();
@@ -238,8 +262,8 @@ fn op_variants_are_versioned() {
             Op::SetHistoryCursor { .. } => 8,
         }
     }
-    /// v9: `Photo.preview_checked` and `Op::SetContent.preview_checked`.
-    const NEWEST_FIELDS: u32 = 9;
+    /// v10: the persisted `RegionKind::IgnoredFace` value in metadata regions.
+    const NEWEST_FIELDS: u32 = 10;
     let newest = since(&Op::SetHistoryCursor { id: PhotoId(1), cursor: None });
     assert_eq!(newest.max(NEWEST_FIELDS), VERSION, "the newest op's or fields' version must be the current format version");
 }

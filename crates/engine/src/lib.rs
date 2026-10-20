@@ -135,6 +135,8 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 pub struct UndoEntry {
     pub label: String,
     pub op: Op,
+    /// This history step must never automatically write metadata beside the originals.
+    pub(crate) catalog_only: bool,
     /// A folder to rename on disk (`from` → `to`) before `op` is applied: Rename / Move Folder
     /// (whose `op` relinks the photos inside). Never overwrites; refused when `to` exists. An
     /// empty `to` removes the (empty) folder `from`, an empty `from` creates `to` (Create Folder).
@@ -602,7 +604,14 @@ impl Session {
         let fwd = op.clone();
         let inv = self.apply_catalog(op)?;
         self.pending_log.push(fwd);
-        self.undo.push(UndoEntry { label: label.to_string(), op: inv, folder: None, retry_inverse: Vec::new(), retry_sidecars: Vec::new() });
+        self.undo.push(UndoEntry {
+            label: label.to_string(),
+            op: inv,
+            catalog_only: false,
+            folder: None,
+            retry_inverse: Vec::new(),
+            retry_sidecars: Vec::new(),
+        });
         self.commits = self.commits.wrapping_add(1);
         if self.undo.len() > 1000 {
             let mut dropped = self.undo.remove(0);
@@ -610,6 +619,19 @@ impl Session {
         }
         for mut dropped in self.redo.drain(..) {
             self.pending_sidecar_repairs.append(&mut dropped.retry_sidecars);
+        }
+        Ok(())
+    }
+
+    /// Commit catalog metadata with history that suppresses automatic sidecar writes,
+    /// including subsequent Undo/Redo; direct calls do not leak command-scoped suppression.
+    pub(crate) fn commit_catalog_only(&mut self, label: &str, op: Op) -> Result<()> {
+        self.commit(label, op)?;
+        if let Some(entry) = self.undo.last_mut() {
+            entry.catalog_only = true;
+        }
+        if self.depth > 0 {
+            self.skip_auto_write = true;
         }
         Ok(())
     }
@@ -719,10 +741,12 @@ impl Session {
             return;
         }
         let tail = self.undo.split_off(self.undo.len() - n);
+        let catalog_only = tail.iter().all(|entry| entry.catalog_only);
         let ops = tail.into_iter().rev().map(|e| e.op).collect();
         self.undo.push(UndoEntry {
             label: label.to_string(),
             op: Op::Batch { ops },
+            catalog_only,
             folder: None,
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -749,10 +773,14 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
+        if self.depth > 0 {
+            self.skip_auto_write |= e.catalog_only;
+        }
         self.pending_log.push(e.op);
         self.redo.push(UndoEntry {
             label: e.label.clone(),
             op: redo,
+            catalog_only: e.catalog_only,
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),
@@ -774,10 +802,14 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
+        if self.depth > 0 {
+            self.skip_auto_write |= e.catalog_only;
+        }
         self.pending_log.push(e.op);
         self.undo.push(UndoEntry {
             label: e.label.clone(),
             op: undo,
+            catalog_only: e.catalog_only,
             folder: e.folder.as_ref().map(FolderMove::reversed),
             retry_inverse: Vec::new(),
             retry_sidecars: Vec::new(),

@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-21 · **Change:** minor (gap 28: F8 shows / hides the right panel; import review album hierarchy, #2362; gap 20: Minolta MRW decodes; gap 10: 551 models verified; gap 15: Print Page Options — page numbers, page info, crop marks; gap 15: Print Page Options — page numbers, page info, crop marks; gap 28: `\` shows / hides the Filter Bar in the grids; gap 21: Indonesian interface shipped, every message but What's New; gap 27: the Windows x64 installer verified on Windows 11; the Settings → Apps uninstall confirmation remains)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-21 · **Change:** minor (LRC-LIB-PEOPLE: persistent Ignore Faces and catalog format 10)
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -57,6 +57,10 @@ Beta-blocking gaps (B) total **~230–430 h**; with the stability and platform w
 - **Localization:** 21
 - **Quality / fidelity:** 1, 3
 - **Stability and platforms:** 9, 26, 27
+
+## Face review coverage
+
+Persistent ignore/restore excludes blurry crops and false detections from recognition without deleting photos or boxes (`faces.ignore`, `faces.ignored`, `view.ignoredFaces`; `docs/faces.md`). Catalog format 10 preserves ignored regions; catalog-only history avoids sidecar and developed-state changes. Live-face matching quality and per-person rejection remain open. No readiness estimate changes.
 
 ## Closed recently (kept for calibration)
 
@@ -134,3 +138,4 @@ Beta-blocking gaps (B) total **~230–430 h**; with the stability and platform w
 | 2026-10-10 | minor | Gap 8: Sony ILCE-7RM6 in-file distortion added next to the ILCE-7RM4A's, its lateral CA parsed but off by default (docs/sony-ilce7rm6-lens-corrections.md); the gap stays open (no lens database), hours unchanged |
 | 2026-10-14 | minor | Gap 10 shrinks: 97 Canon CR2, Pentax and Ricoh models verified on one CC0 file each (334 models, ~50% on a verified body) |
 | 2026-10-14 | minor | Gap 10: 515 of 1,446 models verified (36%), ~84% of photographers on a verified body (integration batch 36) |
+| 2026-10-21 | minor | LRC-LIB-PEOPLE: persistent Ignore Faces, standalone restore review, format-10 migration and catalog-only history; partial status and counts unchanged |

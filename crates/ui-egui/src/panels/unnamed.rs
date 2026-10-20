@@ -127,6 +127,7 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     };
     let mut submit: Option<String> = None;
     let mut clear = false;
+    let mut ignore = false;
     ui.horizontal(|ui| {
         ui.add_space(super::people::PAD - 4.0);
         let n = selected.len();
@@ -151,6 +152,9 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let c = ui.button(crate::i18n::tr("Clear"));
         register(ui.ctx(), "unnamed:clear", c.rect);
         clear = c.clicked() || field.cancelled();
+        let b = ui.button("Ignore selected faces");
+        register(ui.ctx(), "unnamed:ignore", b.rect);
+        ignore = b.clicked();
     });
     // the people already named, matching what is typed (a click names the faces)
     let typed = app.ui.unnamed_name.trim().to_lowercase();
@@ -170,7 +174,16 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             });
         }
     }
-    if let Some(who) = submit {
+    if ignore {
+        let faces: Vec<_> = selected.iter().map(|(photo, index)| json!({"photo": photo, "index": index})).collect();
+        match app.run("faces.ignore", json!({"faces": faces})) {
+            Ok(_) => {
+                app.ui.unnamed_selected.clear();
+                app.ui.unnamed_anchor = None;
+            }
+            Err(error) => app.toast(ui.ctx(), error),
+        }
+    } else if let Some(who) = submit {
         name(app, &selected, &who);
         app.ui.unnamed_selected.clear();
         app.ui.unnamed_name.clear();

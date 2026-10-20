@@ -82,6 +82,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.compare", "Compare", Some("Shift+C"), "View"),
     ("view.survey", "Survey", Some("N"), "View"),
     ("view.people", "People", None, "View"),
+    ("view.ignoredFaces", "Ignored Faces", None, ""),
     ("view.person", "Show Person", None, ""),
     ("view.faceBoxes", "Face Boxes", None, "View"),
     ("view.focusPoint", "Show Focus Point", Some("Alt+F"), "View"),
@@ -575,6 +576,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(json!({"show": app.ui.face_boxes}))
         }
         "view.people" => {
+            app.ui.ignored_faces = None;
             // Everyone; the page just left stays one click away (the chip next to the title)
             if let Some(name) = app.ui.person_page.take() {
                 app.ui.last_person = Some(name);
@@ -584,6 +586,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(json!({"people": app.session.catalog.people().len()}))
         }
         "view.person" => {
+            app.ui.ignored_faces = None;
             // {name}: one person's page in the People view: their faces, and the faces that look like them
             let Some(name) = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
                 return Some(Err("view.person: missing `name`".into()));
@@ -592,6 +595,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.person_from = None;
             app.ui.person_page = Some(name.to_string());
             Ok(json!({"person": name}))
+        }
+        "view.ignoredFaces" => {
+            app.ui.view = ViewMode::People;
+            app.ui.person_page = None;
+            app.ui.ignored_faces = Some(crate::panels::ignored_faces::View::default());
+            app.ui.unnamed_selected.clear();
+            Ok(json!({}))
         }
         "view.survey" => {
             app.ui.view = ViewMode::Survey;
@@ -663,6 +673,8 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             } else if app.ui.right == RightPanel::Crop && app.ui.view == ViewMode::Detail {
                 // Esc leaves the crop tool (the crop stays), as C does; the next Esc goes back
                 panel(app, &ctx, RightPanel::Crop, "Crop, Rotate, Geometry");
+            } else if app.ui.view == ViewMode::People && app.ui.ignored_faces.is_some() {
+                app.ui.ignored_faces = None;
             } else if app.ui.view == ViewMode::People && app.ui.person_page.is_some() {
                 app.ui.person_page = None;
             } else if matches!(app.ui.view, ViewMode::Compare | ViewMode::Survey | ViewMode::Reference) {
