@@ -37,11 +37,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let mut back = false;
     egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            let button = ui.button("‹ People");
+            let button = crate::widgets::arrow_button(ui, crate::i18n::tr("People"), crate::icons::Icon::ChevronLeft, true);
             register(ui.ctx(), "ignoredFaces:back", button.rect);
             back = button.clicked();
-            ui.heading("Ignored faces");
-            let button = ui.button("Refresh ignored faces");
+            ui.heading(crate::i18n::tr("Ignored faces"));
+            let button = ui.button(crate::i18n::tr("Refresh ignored faces"));
             register(ui.ctx(), "ignoredFaces:refresh", button.rect);
             if button.clicked() {
                 view.invalidate();
@@ -60,23 +60,25 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let faces = view.faces.clone().unwrap_or_default();
         let mut restore = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Ignored faces: {} · Selected: {}", faces.len(), view.selected.len()));
-            let button = ui.button("Select all");
+            ui.label(crate::i18n::tr_format!("Ignored faces: {total} · Selected: {selected}", total = faces.len(), selected = view.selected.len()));
+            let button = ui.button(crate::i18n::tr("Select all"));
             register(ui.ctx(), "ignoredFaces:selectAll", button.rect);
             if button.clicked() {
                 view.selected.extend(faces.iter().filter_map(key));
             }
-            let button = ui.button("Clear selection");
+            let button = ui.button(crate::i18n::tr("Clear selection"));
             register(ui.ctx(), "ignoredFaces:clear", button.rect);
             if button.clicked() {
                 view.selected.clear();
                 view.anchor = None;
             }
-            let button = ui.add_enabled(!view.selected.is_empty(), egui::Button::new("Restore selected faces"));
+            let button = ui.add_enabled(!view.selected.is_empty(), egui::Button::new(crate::i18n::tr("Restore selected faces")));
             register(ui.ctx(), "ignoredFaces:restore", button.rect);
             restore = button.clicked();
         });
-        ui.label("Click faces to select or deselect. Shift-click extends that action to a range. Restoration keeps the original name and box.");
+        ui.label(crate::i18n::tr(
+            "Click faces to select or deselect. Shift-click extends that action to a range. Restoration keeps the original name and box.",
+        ));
         if restore {
             let selected: Vec<_> = faces.iter().filter(|f| key(f).is_some_and(|k| view.selected.contains(&k))).cloned().collect();
             match app.run("faces.ignore", json!({"faces": selected, "ignored": false})) {
@@ -86,7 +88,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             return;
         }
         if faces.is_empty() {
-            ui.label("No ignored faces.");
+            ui.label(crate::i18n::tr("No ignored faces."));
         }
         let edge = super::people::card_edge(app.ui.thumb_size);
         let cols = ((ui.available_width() + 12.0) / (edge + 12.0)).floor().max(1.0) as usize;
@@ -131,11 +133,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                         if selected {
                             ui.painter().rect_stroke(image, 3.0, Stroke::new(2.0, Color32::from_rgb(110, 160, 255)), StrokeKind::Inside);
                         }
-                        crate::widgets::announce_selected(&response, "Ignored face", selected);
+                        crate::widgets::announce_selected(&response, crate::i18n::tr("Ignored face"), selected);
                         ui.painter().text(
                             pos2(area.left(), image.bottom() + 12.0),
                             egui::Align2::LEFT_CENTER,
-                            if selected { "✓ Selected" } else { "Not selected" },
+                            if selected { crate::i18n::tr("✓ Selected") } else { crate::i18n::tr("Not selected") },
                             egui::FontId::proportional(12.0),
                             Color32::WHITE,
                         );
@@ -167,17 +169,34 @@ mod tests {
         let mut h = crate::headless::Headless::new(app, [1400.0, 900.0], 1.0);
         let timeout = std::time::Duration::from_secs(15);
         h.step();
-        h.app.run("view.ignoredFaces", json!({})).unwrap();
+        h.app.run("app.language.german", json!({})).unwrap();
+        h.app.run("view.people", json!({})).unwrap();
         h.settle(timeout);
+        assert!(h.painted_text().iter().any(|text| text == "Ignorierte Gesichter…"));
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "unnamed:ignored"}), timeout)["ok"], true);
+        h.settle(timeout);
+        for label in [
+            "Ignorierte Gesichter",
+            "Ignorierte Gesichter aktualisieren",
+            "Ignorierte Gesichter: 1 · Ausgewählt: 0",
+            "Ausgewählte Gesichter wiederherstellen",
+        ] {
+            assert!(h.painted_text().iter().any(|text| text == label), "missing translated label: {label}");
+        }
         for widget in ["ignoredFaces:selectAll", "ignoredFaces:restore"] {
             let response = h.request("ui.clickWidget", json!({"id": widget}), timeout);
             assert_eq!(response["ok"], true, "{response}");
             h.step();
+            if widget == "ignoredFaces:selectAll" {
+                assert!(h.painted_text().iter().any(|text| text == "Ignorierte Gesichter: 1 · Ausgewählt: 1"));
+            }
         }
         let region = &h.app.session.catalog.photo(id).unwrap().meta.regions[0];
         assert_eq!(region.kind, lightcraft_meta::RegionKind::Face);
         assert_eq!(region.name.as_deref(), Some("Person"));
         assert_eq!(region.rect, rect);
+        assert_eq!(crate::i18n::history_label("Ignore Faces", &[]), "Gesichter ignorieren");
+        assert_eq!(crate::i18n::history_label("Restore Ignored Faces", &[]), "Ignorierte Gesichter wiederherstellen");
         h.app.run("edit.undo", json!({})).unwrap();
         assert_eq!(h.app.session.catalog.photo(id).unwrap().meta.regions[0].kind, lightcraft_meta::RegionKind::IgnoredFace);
         h.step();
@@ -219,5 +238,6 @@ mod tests {
         }
         h.app.run("view.back", json!({})).unwrap();
         assert!(h.app.ui.ignored_faces.is_none());
+        h.app.run("app.language.english", json!({})).unwrap();
     }
 }

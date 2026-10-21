@@ -209,7 +209,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.add_space(PAD);
         let active = app.ui.person_selection.active;
-        let button = ui.button(if active { "Done selecting" } else { "Select faces…" });
+        let button = ui.button(if active { crate::i18n::tr("Done selecting") } else { crate::i18n::tr("Select faces…") });
         register(ui.ctx(), "person:selectFaces", button.rect);
         if button.clicked() {
             app.ui.person_selection.active = !active;
@@ -217,19 +217,19 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
             app.ui.person_selection.anchor = None;
         }
         if app.ui.person_selection.active {
-            let all = ui.button("Select all");
+            let all = ui.button(crate::i18n::tr("Select all"));
             register(ui.ctx(), "person:selectAll", all.rect);
             if all.clicked() {
                 app.ui.person_selection.faces.extend(page.confirmed.iter().map(|f| (f.photo, f.index)));
             }
-            let clear = ui.button("Clear selection");
+            let clear = ui.button(crate::i18n::tr("Clear selection"));
             register(ui.ctx(), "person:clearSelection", clear.rect);
             if clear.clicked() {
                 app.ui.person_selection.faces.clear();
                 app.ui.person_selection.anchor = None;
             }
             let count = app.ui.person_selection.faces.len();
-            let ignore = ui.add_enabled(count > 0, egui::Button::new("Ignore selected faces"));
+            let ignore = ui.add_enabled(count > 0, egui::Button::new(crate::i18n::tr("Ignore selected faces")));
             register(ui.ctx(), "person:ignoreSelected", ignore.rect);
             if ignore.clicked() {
                 let faces: Vec<_> = app.ui.person_selection.faces.iter().map(|(photo, index)| json!({"photo": photo, "index": index})).collect();
@@ -244,7 +244,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
         }
     });
     if app.ui.person_selection.active {
-        ui.label("Click faces to select or deselect. Shift-click extends that action to a range. Double-click opens a photo.");
+        ui.label(crate::i18n::tr("Click faces to select or deselect. Shift-click extends that action to a range. Double-click opens a photo."));
     }
     if page.total == 0 {
         super::empty_message(
@@ -409,7 +409,7 @@ fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, r: Rect, f: &Face, ppp: f32,
     }
     let mut hit = Hit::Nothing;
     resp.context_menu(|ui| {
-        let button = ui.button("Ignore face (blurry / not a face)");
+        let button = ui.button(crate::i18n::tr("Ignore face (blurry / not a face)"));
         register(ui.ctx(), "person:ignoreFace", button.rect);
         if button.clicked() {
             hit = Hit::Ignore;

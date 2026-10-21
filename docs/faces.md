@@ -340,7 +340,7 @@ overlapping detection on future scans. Nothing is deleted from the original phot
 Open **Ignored faces…** from People, select faces, then **Restore selected
 faces** to include them again. Restoration preserves the original box, name and description; a
 restored crop returns to the appropriate People view. This review works without
-a recognition model installed. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
+a recognition model installed. Controls and review counts follow the selected interface language. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
 and `faces.ignored {}`. Supplying `rect` protects against stale selections; invalid batches change nothing.
 
 Face naming, ignore/restore, and face-box edits remain catalog-only through

@@ -87,7 +87,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     ui.painter().text(pos2(head.right() - PAD, head.center().y), Align2::RIGHT_CENTER, people.len().to_string(), t.font(13.0), t.text_dim);
     // until face recognition is set up: what it takes, and a button that does the next step
     super::faces::setup_banner(app, ui);
-    let ignored = ui.button("Ignored faces…");
+    let ignored = ui.button(crate::i18n::tr("Ignored faces…"));
     register(ui.ctx(), "unnamed:ignored", ignored.rect);
     if ignored.clicked() {
         let _ = app.run("view.ignoredFaces", json!({}));

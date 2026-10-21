@@ -152,7 +152,7 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let c = ui.button(crate::i18n::tr("Clear"));
         register(ui.ctx(), "unnamed:clear", c.rect);
         clear = c.clicked() || field.cancelled();
-        let b = ui.button("Ignore selected faces");
+        let b = ui.button(crate::i18n::tr("Ignore selected faces"));
         register(ui.ctx(), "unnamed:ignore", b.rect);
         ignore = b.clicked();
     });

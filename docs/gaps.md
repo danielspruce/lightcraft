@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-21 · **Change:** minor (LRC-LIB-PEOPLE: persistent Ignore Faces and catalog format 10)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-22 · **Change:** patch (LRC-LIB-PEOPLE: localized ignore/restore controls)
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -140,3 +140,4 @@ Persistent ignore/restore excludes blurry crops and false detections from recogn
 | 2026-10-14 | minor | Gap 10: 515 of 1,446 models verified (36%), ~84% of photographers on a verified body (integration batch 36) |
 | 2026-10-21 | minor | LRC-LIB-PEOPLE: persistent Ignore Faces, standalone restore review, format-10 migration and catalog-only history; partial status and counts unchanged |
 | 2026-10-21 | patch | LRC-LIB-PEOPLE: refresh ignored review by catalog revision, cover direct-session deletion/restoration, and clarify ignore/rename documentation; counts unchanged |
+| 2026-10-22 | patch | LRC-LIB-PEOPLE: localized ignore/restore review, selection controls and counts in all shipped languages; German rendered restore regression. Status and counts unchanged. |
