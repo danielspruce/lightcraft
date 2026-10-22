@@ -443,6 +443,34 @@ fn ignored_faces_survive_reopening_and_can_be_restored() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Multiple valid ignore batches can exceed the old whole-library cap; every page stays available.
+#[test]
+fn ignored_faces_pages_beyond_100000_and_uses_indexed_views() {
+    let mut s = Session::with_demo();
+    let id = s.catalog.photos().next().unwrap().id;
+    let loose = region(0.1, None).rect;
+    let tight = region(0.2, None).rect;
+    let mut meta = s.catalog.photo(id).unwrap().meta.clone();
+    meta.regions = vec![Region { rect: loose, kind: RegionKind::IgnoredFace, name: None, description: None }; 100_001];
+    s.catalog.apply(Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+    s.faces.index.insert_with_view(id.0, &loose, unit64(&[(0, 1.0)]), &tight);
+
+    let first = s.execute("faces.ignored", &json!({"limit": 2})).unwrap();
+    assert_eq!(first["total"], 100_001);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["faces"].as_array().unwrap().len(), 2);
+    assert_eq!(first["faces"][0]["rect"], json!(loose));
+    assert_eq!(first["faces"][0]["view"], json!(tight));
+    let last = s.execute("faces.ignored", &json!({"offset": 100_000, "limit": 2})).unwrap();
+    assert_eq!(last["total"], 100_001);
+    assert_eq!(last["faces"].as_array().unwrap().len(), 1);
+    assert_eq!(last["faces"][0]["index"], 100_000);
+    assert!(s.execute("faces.ignored", &json!({"offset": 100_001})).unwrap()["faces"].as_array().unwrap().is_empty());
+    for params in [json!({"limit": 0}), json!({"limit": 5001}), json!({"limit": -1}), json!({"offset": -1})] {
+        assert!(s.execute("faces.ignored", &params).is_err(), "{params}");
+    }
+}
+
 #[test]
 fn unnamed_faces_come_with_look_alikes_together_and_the_name_the_named_ones_suggest() {
     let d = temp("unnamed");

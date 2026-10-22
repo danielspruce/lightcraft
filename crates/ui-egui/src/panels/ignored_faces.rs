@@ -6,9 +6,13 @@ use serde_json::{Value, json};
 
 use crate::{LightcraftApp, widgets::register};
 
+const PAGE_SIZE: usize = 1000;
+
 #[derive(Clone, Debug, Default)]
 pub struct View {
     faces: Option<std::sync::Arc<Vec<Value>>>,
+    total: usize,
+    offset: usize,
     selected: HashSet<(u64, usize)>,
     revision: Option<u64>,
     anchor: Option<(usize, bool)>,
@@ -19,6 +23,15 @@ impl View {
     /// Refresh after catalog/history changes and discard potentially stale selection keys.
     pub(crate) fn invalidate(&mut self) {
         *self = Self::default();
+    }
+
+    /// Move to another bounded page, dropping selections whose review entries are no longer shown.
+    fn page(&mut self, offset: usize) {
+        self.faces = None;
+        self.selected.clear();
+        self.anchor = None;
+        self.error = None;
+        self.offset = offset;
     }
 }
 
@@ -49,8 +62,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         });
         if view.faces.is_none() && view.error.is_none() {
             view.revision = Some(app.session.catalog.revision);
-            match app.session.execute("faces.ignored", &json!({})) {
-                Ok(response) => view.faces = Some(std::sync::Arc::new(response["faces"].as_array().cloned().unwrap_or_default())),
+            match app.session.execute("faces.ignored", &json!({"offset": view.offset, "limit": PAGE_SIZE})) {
+                Ok(response) => {
+                    view.total = response["total"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or_default();
+                    view.faces = Some(std::sync::Arc::new(response["faces"].as_array().cloned().unwrap_or_default()));
+                }
                 Err(error) => view.error = Some(error.to_string()),
             }
         }
@@ -60,7 +76,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let faces = view.faces.clone().unwrap_or_default();
         let mut restore = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(crate::i18n::tr_format!("Ignored faces: {total} · Selected: {selected}", total = faces.len(), selected = view.selected.len()));
+            ui.label(crate::i18n::tr_format!("Ignored faces: {total} · Selected: {selected}", total = view.total, selected = view.selected.len()));
             let button = ui.button(crate::i18n::tr("Select all"));
             register(ui.ctx(), "ignoredFaces:selectAll", button.rect);
             if button.clicked() {
@@ -76,6 +92,26 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             register(ui.ctx(), "ignoredFaces:restore", button.rect);
             restore = button.clicked();
         });
+        let mut requested_page = None;
+        if view.total > PAGE_SIZE {
+            ui.horizontal(|ui| {
+                let previous = ui.add_enabled(view.offset > 0, egui::Button::new(crate::i18n::tr("Previous page")));
+                register(ui.ctx(), "ignoredFaces:previous", previous.rect);
+                if previous.clicked() {
+                    requested_page = Some(view.offset.saturating_sub(PAGE_SIZE));
+                }
+                ui.label(format!("{} {} / {}", crate::i18n::tr("Page"), view.offset / PAGE_SIZE + 1, view.total.div_ceil(PAGE_SIZE)));
+                let next = ui.add_enabled(view.offset.saturating_add(faces.len()) < view.total, egui::Button::new(crate::i18n::tr("Next page")));
+                register(ui.ctx(), "ignoredFaces:next", next.rect);
+                if next.clicked() {
+                    requested_page = Some(view.offset.saturating_add(PAGE_SIZE));
+                }
+            });
+        }
+        if let Some(offset) = requested_page {
+            view.page(offset);
+            return;
+        }
         ui.label(crate::i18n::tr(
             "Click faces to select or deselect. Shift-click extends that action to a range. Restoration keeps the original name and box.",
         ));
@@ -155,6 +191,59 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library over one page remains reviewable, and changing pages cannot restore stale selections.
+    #[test]
+    fn ignored_review_pages_and_restores_the_last_face() {
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), crate::Services::default());
+        let id = app.session.catalog.photos().next().unwrap().id;
+        let mut meta = app.session.catalog.photo(id).unwrap().meta.clone();
+        let region = lightcraft_meta::Region {
+            rect: lightcraft_geom::Rect { x0: 0.2, y0: 0.2, x1: 0.6, y1: 0.6 },
+            kind: lightcraft_meta::RegionKind::IgnoredFace,
+            name: None,
+            description: None,
+        };
+        meta.regions = vec![region; PAGE_SIZE + 1];
+        app.session.commit("setup", lightcraft_catalog::Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+        let mut h = crate::headless::Headless::new(app, [1400.0, 900.0], 1.0);
+        let timeout = std::time::Duration::from_secs(15);
+        h.step();
+        h.app.run("view.people", json!({})).unwrap();
+        h.settle(timeout);
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "unnamed:ignored"}), timeout)["ok"], true);
+        h.settle(timeout);
+        assert_eq!(h.app.ui.ignored_faces.as_ref().unwrap().faces.as_ref().unwrap().len(), PAGE_SIZE);
+        assert_eq!(h.app.ui.ignored_faces.as_ref().unwrap().total, PAGE_SIZE + 1);
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "ignoredFaces:selectAll"}), timeout)["ok"], true);
+        h.step();
+        assert_eq!(h.app.ui.ignored_faces.as_ref().unwrap().selected.len(), PAGE_SIZE);
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "ignoredFaces:next"}), timeout)["ok"], true);
+        h.step();
+        let view = h.app.ui.ignored_faces.as_ref().unwrap();
+        assert_eq!(view.offset, PAGE_SIZE);
+        assert_eq!(view.faces.as_ref().unwrap().len(), 1);
+        assert!(view.selected.is_empty());
+        if let Some(path) = std::env::var_os("LIGHTCRAFT_IGNORED_PAGED_SCREENSHOT") {
+            let shot = h.snapshot(timeout);
+            let image = lightcraft_raster::Rgba8::from_fn(shot.size[0], shot.size[1], |x, y| shot.pixels[y * shot.size[0] + x].to_array());
+            let png = lightcraft_engine::export::encode_image(
+                &image,
+                &lightcraft_engine::export::ExportOptions { format: lightcraft_engine::export::ExportFormat::Png, ..Default::default() },
+            )
+            .unwrap();
+            std::fs::write(path, png).unwrap();
+        }
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "ignoredFaces:selectAll"}), timeout)["ok"], true);
+        h.step();
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "ignoredFaces:restore"}), timeout)["ok"], true);
+        h.step();
+        assert_eq!(h.app.session.catalog.photo(id).unwrap().meta.regions[PAGE_SIZE].kind, lightcraft_meta::RegionKind::Face);
+        let view = h.app.ui.ignored_faces.as_ref().unwrap();
+        assert_eq!(view.total, PAGE_SIZE);
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.faces.as_ref().unwrap().len(), PAGE_SIZE);
+    }
 
     /// Restore a retained assignment through the actual panel without any recognition model.
     #[test]

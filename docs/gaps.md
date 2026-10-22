@@ -1,6 +1,6 @@
 # Gaps: where LightCraft falls short of Lightroom
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-22 · **Change:** patch (LRC-LIB-PEOPLE: preserve XMP writes in mixed face/metadata commands)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-23 · **Change:** patch (LRC-LIB-PEOPLE: paged ignored-face review and indexed crops)
 
 Every known shortfall, one entry each, ranked by user impact (how many Lightroom users hit it, and
 how hard it blocks them), then by effort. **Agents pick work from the top** (the first entry nobody is
@@ -143,3 +143,4 @@ Persistent ignore/restore excludes blurry crops and false detections from recogn
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: localized ignore/restore review, selection controls and counts in all shipped languages; German rendered restore regression. Status and counts unchanged. |
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: mixed face edits/history and ordinary metadata commands retain XMP auto-write; wholly catalog-only commands stay suppressed. Double-click navigation preserves confirmed-face selections and anchors. Status and counts unchanged. |
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: rebased onto upstream integration; preserved upstream translations and supplied ignore/restore messages for newly shipped Finnish, Indonesian, Swedish and Vietnamese. Status and counts unchanged. |
+| 2026-10-23 | patch | LRC-LIB-PEOPLE: ignored-face review stays available above 100,000 faces through bounded pages; tiles use indexed crops. Matching quality remains open; counts unchanged. |

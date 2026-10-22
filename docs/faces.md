@@ -340,8 +340,8 @@ overlapping detection on future scans. Nothing is deleted from the original phot
 Open **Ignored faces…** from People, select faces, then **Restore selected
 faces** to include them again. Restoration preserves the original box, name and description; a
 restored crop returns to the appropriate People view. This review works without
-a recognition model installed. Controls and review counts follow the selected interface language. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
-and `faces.ignored {}`. Supplying `rect` protects against stale selections; invalid batches change nothing.
+a recognition model installed. Controls and review counts follow the selected interface language. When there are more than 1,000 ignored faces, use **Previous page** and **Next page** to review all of them; selection is cleared when changing pages. The tiles use the same indexed detector crops as People. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
+and `faces.ignored {offset?: 0, limit?: 1000}` (at most 5,000 per page; returns the library-wide `total` and page `faces`). Supplying `rect` protects against stale selections; invalid batches change nothing.
 
 Double-clicking a confirmed face opens its photo and preserves the prior selection and range anchor when returning to the person page.
 

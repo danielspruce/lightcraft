@@ -72,19 +72,31 @@ fn ignore_faces(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"changed": count, "ignored": ignored}))
 }
 
-/// List retained ignored regions for review and restoration without requiring a recognition model.
-fn ignored_faces(s: &mut Session, _: &Value) -> Result<Value> {
+/// List one bounded page of retained ignored regions in catalog order, without a recognition model.
+fn ignored_faces(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "faces.ignored";
+    let offset = match p.get("offset") {
+        None => 0,
+        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad(C, "offset must be a nonnegative index"))?,
+    };
+    let limit = match p.get("limit") {
+        None => 1000,
+        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad(C, "limit must be between 1 and 5000"))?,
+    };
+    if !(1..=5000).contains(&limit) {
+        return Err(bad(C, "limit must be between 1 and 5000"));
+    }
     let mut faces = Vec::new();
+    let mut total = 0usize;
     for photo in s.catalog.photos().filter(|p| p.in_library()) {
         for (index, region) in photo.meta.regions.iter().enumerate().filter(|(_, r)| r.kind == lightcraft_meta::RegionKind::IgnoredFace) {
-            if faces.len() >= 100_000 {
-                return Err(bad("faces.ignored", "at most 100000 ignored faces can be reviewed at once"));
+            if total >= offset && faces.len() < limit {
+                faces.push(json!({"photo": photo.id.0, "index": index, "rect": region.rect, "view": s.face_view(photo.id, region.rect)}));
             }
-            faces.push(json!({"photo": photo.id.0, "index": index, "rect": region.rect, "view": region.rect}));
+            total = total.saturating_add(1);
         }
     }
-    faces.sort_by_key(|f| (f["photo"].as_u64(), f["index"].as_u64()));
-    Ok(json!({"total": faces.len(), "faces": faces}))
+    Ok(json!({"total": total, "offset": offset, "faces": faces}))
 }
 
 /// Give a face region its name. Naming makes the face yours: a later "Detect Faces" run no longer replaces it.
@@ -1173,7 +1185,7 @@ pub fn specs() -> Vec<CommandSpec> {
             ignore_faces
         ),
         cmd!(query "faces.ignored", "Ignored Faces", [], None,
-            "{} — review ignored faces across the library, including named faces excluded from matching", super::always, ignored_faces),
+            "{offset?: 0, limit?: 1000} → {total, offset, faces} — review ignored faces in catalog order, including named faces excluded from matching; limit is 1..5000", super::always, ignored_faces),
         cmd!(
             "faces.index",
             "Index Faces",
