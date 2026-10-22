@@ -69,7 +69,6 @@ fn ignore_faces(s: &mut Session, p: &Value) -> Result<Value> {
         if ignored { "Ignore Faces" } else { "Restore Ignored Faces" },
         Op::Batch { ops: edits.into_iter().map(|(id, meta)| Op::SetMeta { id, meta: Box::new(meta) }).collect() },
     )?;
-    s.skip_auto_write = true;
     Ok(json!({"changed": count, "ignored": ignored}))
 }
 
@@ -135,7 +134,6 @@ fn name_faces(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let photos = ops.len();
     s.commit_catalog_only(if name.is_some() { "Name Faces" } else { "Clear Face Names" }, Op::Batch { ops })?;
-    s.skip_auto_write = true;
     Ok(json!({"named": named, "photos": photos, "name": name}))
 }
 
@@ -150,7 +148,6 @@ fn set_name(s: &mut Session, p: &Value) -> Result<Value> {
     let region = meta.regions.get_mut(index).ok_or_else(|| bad(C, "no such region"))?;
     apply_name(region, &name);
     s.commit_catalog_only(if name.is_some() { "Name Face" } else { "Clear Face Name" }, Op::SetMeta { id, meta: Box::new(meta) })?;
-    s.skip_auto_write = true;
     Ok(json!({"id": id.0, "index": index, "name": name}))
 }
 
@@ -233,7 +230,6 @@ fn rename_person(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let photos = ops.len();
     s.commit_catalog_only(if other { "Merge People" } else { "Rename Person" }, Op::Batch { ops })?;
-    s.skip_auto_write = true;
     if s.filter.person.as_deref().is_some_and(|n| n.trim().to_lowercase() == from_key) {
         s.filter.person = Some(to.clone());
     }

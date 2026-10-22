@@ -343,9 +343,11 @@ restored crop returns to the appropriate People view. This review works without
 a recognition model installed. Controls and review counts follow the selected interface language. Open directly with `view.ignoredFaces`. Commands: `faces.ignore {faces: [{photo, index, rect?}], ignored?: true}`
 and `faces.ignored {}`. Supplying `rect` protects against stale selections; invalid batches change nothing.
 
+Double-clicking a confirmed face opens its photo and preserves the prior selection and range anchor when returning to the person page.
+
 Face naming, ignore/restore, and face-box edits remain catalog-only through
 Undo and Redo, even when automatic XMP writing is enabled. They do not mark photos as developed
-or add develop-history entries. The ignored-face review refreshes whenever the catalog revision changes, including direct-session commands and deletion/restoration. Selections are cleared so stale region indices cannot be reused.
+or add develop-history entries. The ignored-face review refreshes whenever the catalog revision changes, including direct-session commands and deletion/restoration. Selections are cleared so stale region indices cannot be reused. A command combining face changes or their Undo/Redo with ordinary metadata changes still writes the ordinary metadata when automatic XMP writing is enabled.
 
 Ignored faces require **catalog format 10**. Opening an existing format-9 library upgrades its
 catalog automatically, preserving existing assignments and ignored regions. Older builds then

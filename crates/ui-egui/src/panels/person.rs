@@ -22,6 +22,27 @@ pub struct Selection {
     active: bool,
     faces: std::collections::HashSet<(u64, usize)>,
     anchor: Option<(usize, bool)>,
+    before_click: Option<BeforeClick>,
+}
+
+#[derive(Clone, Debug)]
+struct BeforeClick {
+    face: (u64, usize),
+    faces: std::collections::HashSet<(u64, usize)>,
+    anchor: Option<(usize, bool)>,
+}
+
+/// A double-click opens the photo without retaining the first click's range/anchor changes.
+fn click_confirmed(selection: &mut Selection, faces: &[Face], target: &Face, shift: bool, double: bool) {
+    if double {
+        if let Some(before) = selection.before_click.take().filter(|before| before.face == (target.photo, target.index)) {
+            selection.faces = before.faces;
+            selection.anchor = before.anchor;
+        }
+    } else {
+        selection.before_click = Some(BeforeClick { face: (target.photo, target.index), faces: selection.faces.clone(), anchor: selection.anchor });
+        select_confirmed(selection, faces, target, shift);
+    }
 }
 
 /// Repeat the anchor's include/exclude action over a range of confirmed faces.
@@ -108,6 +129,7 @@ fn page_for(app: &mut LightcraftApp, name: &str, now: f64) -> Arc<PersonPage> {
 enum Hit {
     Nothing,
     Open,
+    OpenDouble,
     Confirm,
     ConfirmAbove,
     Dismiss,
@@ -214,18 +236,21 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
         if button.clicked() {
             app.ui.person_selection.active = !active;
             app.ui.person_selection.faces.clear();
+            app.ui.person_selection.before_click = None;
             app.ui.person_selection.anchor = None;
         }
         if app.ui.person_selection.active {
             let all = ui.button(crate::i18n::tr("Select all"));
             register(ui.ctx(), "person:selectAll", all.rect);
             if all.clicked() {
+                app.ui.person_selection.before_click = None;
                 app.ui.person_selection.faces.extend(page.confirmed.iter().map(|f| (f.photo, f.index)));
             }
             let clear = ui.button(crate::i18n::tr("Clear selection"));
             register(ui.ctx(), "person:clearSelection", clear.rect);
             if clear.clicked() {
                 app.ui.person_selection.faces.clear();
+                app.ui.person_selection.before_click = None;
                 app.ui.person_selection.anchor = None;
             }
             let count = app.ui.person_selection.faces.len();
@@ -236,6 +261,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
                 match app.run("faces.ignore", json!({"faces": faces})) {
                     Ok(_) => {
                         app.ui.person_selection.faces.clear();
+                        app.ui.person_selection.before_click = None;
                         app.ui.person_selection.anchor = None;
                     }
                     Err(error) => app.toast(ui.ctx(), error),
@@ -298,10 +324,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
                 let action = tile(app, ui, Rect::from_min_size(min, vec2(edge, edge)), f, ppp, false, &shown_name, 0);
                 if action == Hit::Ignore {
                     hit = Some((action, f.clone()));
-                } else if action == Hit::Open {
-                    if app.ui.person_selection.active && !ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
-                        select_confirmed(&mut app.ui.person_selection, &page.confirmed, f, ui.input(|i| i.modifiers.shift));
-                    } else {
+                } else if matches!(action, Hit::Open | Hit::OpenDouble) {
+                    let double = action == Hit::OpenDouble;
+                    if app.ui.person_selection.active {
+                        click_confirmed(&mut app.ui.person_selection, &page.confirmed, f, ui.input(|i| i.modifiers.shift), double);
+                    }
+                    if !app.ui.person_selection.active || double {
                         hit = Some((Hit::Open, f.clone()));
                     }
                 }
@@ -355,7 +383,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, name: &str) {
     });
     if let Some((what, f)) = hit {
         match what {
-            Hit::Open => {
+            Hit::Open | Hit::OpenDouble => {
                 let _ = app.run("library.select", json!({"ids": [f.photo], "active": f.photo}));
                 let _ = app.run("view.detail", json!({}));
                 // Escape comes back to this page; the People button to everyone, with this person next to its title
@@ -452,7 +480,9 @@ fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, r: Rect, f: &Face, ppp: f32,
         }
     } else {
         let _ = resp.clone().on_hover_text(format!("{name} — click to open this photo"));
-        if resp.clicked() {
+        if resp.double_clicked() {
+            hit = Hit::OpenDouble;
+        } else if resp.clicked() {
             hit = Hit::Open;
         }
     }
@@ -524,6 +554,55 @@ mod tests {
         assert_eq!(h.app.session.catalog.photo(ids[1]).unwrap().meta.regions[0].kind, lightcraft_meta::RegionKind::Face);
         h.app.run("edit.redo", json!({})).unwrap();
         assert_eq!(h.app.session.catalog.photo(ids[1]).unwrap().meta.regions[0].kind, lightcraft_meta::RegionKind::IgnoredFace);
+    }
+
+    /// Double-click navigation restores the whole pre-click range and anchor on return.
+    #[test]
+    fn double_clicking_a_confirmed_face_preserves_selection_and_anchor() {
+        let timeout = std::time::Duration::from_secs(15);
+        for case in 0..3 {
+            let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
+            let ids: Vec<_> = app.session.catalog.photos().take(4).map(|p| p.id).collect();
+            for id in ids {
+                let mut meta = app.session.catalog.photo(id).unwrap().meta.clone();
+                meta.regions = vec![lightcraft_meta::Region {
+                    rect: lightcraft_geom::Rect { x0: 0.1, y0: 0.1, x1: 0.4, y1: 0.4 },
+                    kind: lightcraft_meta::RegionKind::Face,
+                    name: Some("Person".into()),
+                    description: None,
+                }];
+                app.session.commit("setup", lightcraft_catalog::Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+            }
+            let mut h = crate::headless::Headless::new(app, [1400.0, 900.0], 1.0);
+            h.app.run("view.person", json!({"name": "Person"})).unwrap();
+            h.settle(timeout);
+            let faces = parse(&h.app.session.execute("faces.person", &json!({"name": "Person"})).unwrap()).confirmed;
+            assert_eq!(faces.len(), 4);
+            h.app.ui.person_selection.active = true;
+            select_confirmed(&mut h.app.ui.person_selection, &faces, &faces[0], false);
+            if case == 2 {
+                select_confirmed(&mut h.app.ui.person_selection, &faces, &faces[3], true);
+                select_confirmed(&mut h.app.ui.person_selection, &faces, &faces[1], false);
+            }
+            let before = h.app.ui.person_selection.clone();
+            // Keep these two clicks separate from setup/navigation click bursts.
+            for _ in 0..60 {
+                h.step();
+            }
+            let widget = format!("person-face:{}:{}", faces[3].photo, faces[3].index);
+            let params = json!({"id": widget, "shift": case != 0});
+            assert_eq!(h.request("ui.clickWidget", params.clone(), timeout)["ok"], true);
+            h.step();
+            assert_ne!(h.app.ui.person_selection.faces, before.faces);
+            assert_eq!(h.request("ui.clickWidget", params, timeout)["ok"], true);
+            h.step();
+            assert_eq!(h.app.ui.view, crate::state::ViewMode::Detail, "case {case}");
+            h.app.run("view.back", json!({})).unwrap();
+            h.step();
+            assert_eq!(h.app.ui.person_page.as_deref(), Some("Person"));
+            assert_eq!(h.app.ui.person_selection.faces, before.faces, "case {case}");
+            assert_eq!(h.app.ui.person_selection.anchor, before.anchor, "case {case}");
+        }
     }
 
     /// Shift ranges repeat the anchor action for both inclusion and exclusion.

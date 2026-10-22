@@ -293,8 +293,6 @@ fn detect(s: &mut Session, p: &Value) -> Result<Value> {
     let applied = !ops.is_empty();
     if applied {
         s.commit_catalog_only("Detect Faces", Op::Batch { ops })?;
-        // regions are not written to XMP, so a sidecar must not be rewritten for this
-        s.skip_auto_write = true;
     }
     Ok(json!({"detector": LABEL, "applied": applied, "photos": results, "ms": started.elapsed().as_secs_f64() * 1000.0}))
 }

@@ -1,6 +1,6 @@
 # Lightroom parity checklist
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** patch (LRC-LIB-PEOPLE: localized ignore/restore controls) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** patch (LRC-LIB-PEOPLE: preserve XMP writes in mixed face/metadata commands) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 The measured, row-by-row checklist: one row per Lightroom feature, menu item and shortcut, what we
 have and what is missing. It answers *does the feature exist?* (feature breadth). Whether it is good
@@ -930,3 +930,4 @@ Latin stays upright. Advanced Japanese composition remains open. Regression cove
 | 2026-10-21 | minor | LRC-LIB-PEOPLE: persistent Ignore Faces, standalone restore review, format-10 migration and catalog-only history; partial status and counts unchanged |
 | 2026-10-21 | patch | LRC-LIB-PEOPLE: refresh ignored review by catalog revision, cover direct-session deletion/restoration, and clarify ignore/rename documentation; counts unchanged |
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: localized ignore/restore review, selection controls and counts in all shipped languages; German rendered restore regression. Status and counts unchanged. |
+| 2026-10-22 | patch | LRC-LIB-PEOPLE: mixed face edits/history and ordinary metadata commands retain XMP auto-write; wholly catalog-only commands stay suppressed. Double-click navigation preserves confirmed-face selections and anchors. Status and counts unchanged. |

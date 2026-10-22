@@ -243,9 +243,11 @@ pub struct Session {
     /// Exact filesystem repairs from discarded history; catalog inverses stay discarded.
     pub(crate) pending_sidecar_repairs: Vec<rename::SidecarMove>,
     pub interaction: Option<Interaction>,
-    /// Set by a command whose change must not rewrite the photo's XMP sidecar even with auto-write on
-    /// (a catalog-only edit of data the sidecar writer does not emit); consumed when the command ends.
+    /// Explicit sidecar suppression for imports/background work; consumed when the command ends.
+    /// Face history uses catalog_only_changes instead, so mixed commands retain ordinary writes.
     pub(crate) skip_auto_write: bool,
+    /// Catalog-only log records emitted within the current outer command (not prior pending work).
+    catalog_only_changes: usize,
     /// The order of Reload from Disk runs, so an older one finishing late is dropped ([`cmd::reload`]).
     pub(crate) reload_tickets: cmd::reload::Tickets,
     /// Photos whose automatic XMP sidecar write failed (their folder offline, read-only or full), written again by
@@ -442,6 +444,7 @@ impl Session {
             pending_sidecar_repairs: Vec::new(),
             interaction: None,
             skip_auto_write: false,
+            catalog_only_changes: 0,
             reload_tickets: Default::default(),
             unsaved_sidecars: Default::default(),
             denoise: Default::default(),
@@ -555,6 +558,8 @@ impl Session {
         // last-resort guard: a panic in a command is that command's error, not a crash
         let r = guard::catch(&format!("`{id}`"), || f(self)).unwrap_or_else(|e| Err(EngineError::Other(e)));
         self.depth -= 1;
+        // Count caller changes before automatic version bookkeeping adds its own records.
+        let command_changes = self.pending_log.len().saturating_sub(log_start);
         if self.depth == 0 && was_active.is_some() && self.active() != was_active {
             self.previous_active = was_active;
             if let Some(left) = was_active {
@@ -571,7 +576,8 @@ impl Session {
             }
         }
         if self.depth == 0 {
-            let skip = std::mem::take(&mut self.skip_auto_write);
+            let catalog_only = std::mem::take(&mut self.catalog_only_changes);
+            let skip = std::mem::take(&mut self.skip_auto_write) || (catalog_only > 0 && catalog_only == command_changes);
             if r.is_ok() && !skip && self.xmp.auto_write && self.interaction.is_none() && self.pending_log.len() > log_start {
                 self.auto_write_sidecars_since(log_start);
             }
@@ -624,14 +630,15 @@ impl Session {
     }
 
     /// Commit catalog metadata with history that suppresses automatic sidecar writes,
-    /// including subsequent Undo/Redo; direct calls do not leak command-scoped suppression.
+    /// including subsequent Undo/Redo, when the whole command is catalog-only. Direct calls
+    /// do not leak command-scoped suppression.
     pub(crate) fn commit_catalog_only(&mut self, label: &str, op: Op) -> Result<()> {
         self.commit(label, op)?;
         if let Some(entry) = self.undo.last_mut() {
             entry.catalog_only = true;
         }
         if self.depth > 0 {
-            self.skip_auto_write = true;
+            self.catalog_only_changes = self.catalog_only_changes.saturating_add(1);
         }
         Ok(())
     }
@@ -775,8 +782,8 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
-        if self.depth > 0 {
-            self.skip_auto_write |= e.catalog_only;
+        if self.depth > 0 && e.catalog_only {
+            self.catalog_only_changes = self.catalog_only_changes.saturating_add(1);
         }
         self.pending_log.push(e.op);
         self.redo.push(UndoEntry {
@@ -806,8 +813,8 @@ impl Session {
             }
         };
         self.show_undone(&e.op);
-        if self.depth > 0 {
-            self.skip_auto_write |= e.catalog_only;
+        if self.depth > 0 && e.catalog_only {
+            self.catalog_only_changes = self.catalog_only_changes.saturating_add(1);
         }
         self.pending_log.push(e.op);
         self.undo.push(UndoEntry {
