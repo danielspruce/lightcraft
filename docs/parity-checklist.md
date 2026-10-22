@@ -931,3 +931,4 @@ Latin stays upright. Advanced Japanese composition remains open. Regression cove
 | 2026-10-21 | patch | LRC-LIB-PEOPLE: refresh ignored review by catalog revision, cover direct-session deletion/restoration, and clarify ignore/rename documentation; counts unchanged |
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: localized ignore/restore review, selection controls and counts in all shipped languages; German rendered restore regression. Status and counts unchanged. |
 | 2026-10-22 | patch | LRC-LIB-PEOPLE: mixed face edits/history and ordinary metadata commands retain XMP auto-write; wholly catalog-only commands stay suppressed. Double-click navigation preserves confirmed-face selections and anchors. Status and counts unchanged. |
+| 2026-10-22 | patch | LRC-LIB-PEOPLE: rebased onto upstream integration; preserved upstream translations and supplied ignore/restore messages for newly shipped Finnish, Indonesian, Swedish and Vietnamese. Status and counts unchanged. |
